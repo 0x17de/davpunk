@@ -29,6 +29,7 @@ from PySide6.QtWidgets import (
 from davpunk.core import cache
 from davpunk.models.task import Status, Task
 from davpunk.ui import viewmodel as vm
+from davpunk.ui.filter_bar import FilterBar
 
 log = logging.getLogger("davpunk.ui.views")
 
@@ -196,12 +197,24 @@ class KanbanView(QWidget):
         self.conn = conn
         self.config = config
         self.columns = config.kanban.columns
+        self.filter = vm.TaskFilter()
 
-        layout = QHBoxLayout(self)
+        outer = QVBoxLayout(self)
+        self.filter_bar = FilterBar()
+        self.filter_bar.filterChanged.connect(self._on_filter_changed)
+        outer.addWidget(self.filter_bar)
+
+        board = QWidget()
+        layout = QHBoxLayout(board)
+        layout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(board, 1)
         self.lists: dict[str, QListWidget] = {}
+        self.headers: dict[str, QLabel] = {}
         for column in self.columns:
             box = QVBoxLayout()
-            box.addWidget(QLabel(f"<b>{column.label}</b>"))
+            header = QLabel(f"<b>{column.label}</b>")
+            self.headers[column.id] = header
+            box.addWidget(header)
             widget = QListWidget()
             widget.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
             widget.setDefaultDropAction(Qt.DropAction.MoveAction)
@@ -211,13 +224,41 @@ class KanbanView(QWidget):
             layout.addLayout(box)
 
     def refresh(self) -> None:
-        board = vm.kanban_board(vm.load_tasks(self.conn), self.columns)
+        tasks = vm.load_tasks(self.conn)
+        # Offer only what the data actually contains, so the picker can never
+        # list a tag or a calendar that would match nothing.
+        self.filter_bar.set_calendars(self._calendar_names())
+        self.filter_bar.set_tags(vm.available_tags(tasks))
+
+        board = vm.kanban_board(tasks, self.columns, self.filter)
+        shown = 0
         for column_id, widget in self.lists.items():
             widget.clear()
             for task in board[column_id]:
                 item = QListWidgetItem(task.summary or "(no summary)")
                 item.setData(TASK_ROLE, task)
                 widget.addItem(item)
+                shown += 1
+        self._update_counts(board, shown, len(tasks))
+
+    def _calendar_names(self) -> dict[str, str]:
+        return {
+            row["id"]: row["display_name"] or row["href"]
+            for row in cache.calendar_rows(self.conn)
+            if row["available"]
+        }
+
+    def _update_counts(self, board: dict, shown: int, total: int) -> None:
+        for column in self.columns:
+            self.headers[column.id].setText(f"<b>{column.label}</b>  ({len(board[column.id])})")
+        if self.filter.is_active:
+            self.filter_bar.summary.setText(
+                f"{self.filter.describe(self._calendar_names())}  —  {shown} of {total}"
+            )
+
+    def _on_filter_changed(self, task_filter) -> None:
+        self.filter = task_filter
+        self.refresh()
 
     def _activated(self, item: QListWidgetItem) -> None:
         task = item.data(TASK_ROLE)

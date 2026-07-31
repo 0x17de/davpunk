@@ -178,9 +178,13 @@ def column_of(task: Task, columns: list[KanbanColumn]) -> KanbanColumn:
     return columns[0]
 
 
-def kanban_board(tasks: list[Task], columns: list[KanbanColumn]) -> dict[str, list[Task]]:
+def kanban_board(
+    tasks: list[Task],
+    columns: list[KanbanColumn],
+    task_filter: TaskFilter | None = None,
+) -> dict[str, list[Task]]:
     board: dict[str, list[Task]] = {column.id: [] for column in columns}
-    for task in tasks:
+    for task in apply_filter(tasks, task_filter):
         board[column_of(task, columns).id].append(task)
     for items in board.values():
         items.sort(key=sort_key)
@@ -190,6 +194,75 @@ def kanban_board(tasks: list[Task], columns: list[KanbanColumn]) -> dict[str, li
 def drop_fields(column: KanbanColumn) -> dict[str, object]:
     """A drag sets **both** STATUS and the override, in one update."""
     return {"status": Status(column.status), "kanban_col": column.id}
+
+
+# ------------------------------------------------------------------ filtering
+
+
+@dataclass(frozen=True)
+class TaskFilter:
+    """Which tasks a view should show.
+
+    Empty means "no restriction on this axis", not "show nothing" — an empty
+    filter is the natural starting state, and treating it as an exclusion would
+    make a fresh view look broken.
+    """
+
+    calendar_ids: frozenset[str] = frozenset()
+    tags: frozenset[str] = frozenset()
+    #: With several tags selected: require all of them rather than any.
+    match_all_tags: bool = False
+    text: str = ""
+
+    @property
+    def is_active(self) -> bool:
+        return bool(self.calendar_ids or self.tags or self.text.strip())
+
+    def matches(self, task: Task) -> bool:
+        if self.calendar_ids and task.calendar_id not in self.calendar_ids:
+            return False
+
+        if self.tags:
+            have = set(task.categories)
+            if self.match_all_tags:
+                if not self.tags <= have:
+                    return False
+            elif not (self.tags & have):
+                return False
+
+        needle = self.text.strip().casefold()
+        if needle:
+            haystack = f"{task.summary or ''}\n{task.description or ''}".casefold()
+            if needle not in haystack:
+                return False
+        return True
+
+    def describe(self, calendar_names: dict[str, str] | None = None) -> str:
+        """A short summary for the filter bar."""
+        if not self.is_active:
+            return "No filter"
+        names = calendar_names or {}
+        parts = []
+        if self.calendar_ids:
+            listed = sorted(names.get(c, c[:8]) for c in self.calendar_ids)
+            parts.append(listed[0] if len(listed) == 1 else f"{len(listed)} lists")
+        if self.tags:
+            joiner = " + " if self.match_all_tags else ", "
+            parts.append(joiner.join(sorted(self.tags)))
+        if self.text.strip():
+            parts.append(f"“{self.text.strip()}”")
+        return " · ".join(parts)
+
+
+def apply_filter(tasks: list[Task], task_filter: TaskFilter | None) -> list[Task]:
+    if task_filter is None or not task_filter.is_active:
+        return list(tasks)
+    return [task for task in tasks if task_filter.matches(task)]
+
+
+def available_tags(tasks: list[Task]) -> list[str]:
+    """Every tag actually in use, so the picker cannot offer a dead one."""
+    return sorted({tag for task in tasks for tag in task.categories})
 
 
 # ------------------------------------------------------------------- trees

@@ -1014,6 +1014,20 @@ Column `id`s must be unique; several columns *may* share a `status` — that is
 what the override exists for. An orphaned override falls through to rule 2 and
 is rewritten on the next drag; it is preserved in the ICS meanwhile.
 
+**Board filter.** The board carries a filter bar over three axes, all optional
+and combined with AND: **lists** (multi-select), **tags** (multi-select, `any`
+or `all`), and a free-text substring over summary and description. Selection is
+runtime state, not a stored preference — like `show_completed`, it is a way of
+looking at the board right now, not a setting.
+
+The two multi-selects normalise differently, because the data does. Every task
+belongs to exactly one calendar, so ticking *every* list is the same as ticking
+none and is reported as "all"; a task may carry *no* tags, so ticking every tag
+still means "has at least one tag" and stays an active filter. Only tags
+actually in use are offered, so the picker cannot offer a dead one. The filter
+applies before columns are assigned, and each column header shows the count it
+is currently displaying.
+
 ---
 
 ## 15. MCP exposure

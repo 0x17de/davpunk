@@ -36,6 +36,9 @@ log = logging.getLogger("davpunk.ui.main_window")
 #: ``MAX(last_modified), COUNT(*)`` with ``is_syncing()``.
 POLL_MS = 2000
 
+#: config `default_view` -> index in the view switcher and the stack.
+VIEW_INDEX = {"list": 0, "kanban": 1, "search": 2}
+
 
 class MainWindow(QMainWindow):
     refreshed = Signal()
@@ -78,7 +81,11 @@ class MainWindow(QMainWindow):
         self._poll.timeout.connect(self._tick)
         self._poll.start(POLL_MS)
 
-        self.stack.setCurrentIndex(0 if config.default_view == "list" else 1)
+        # Through switch_view, not stack.setCurrentIndex: setting the stack
+        # directly leaves the toolbar combo reading "List" while the Kanban
+        # board is on screen, and the first thing you do to the combo then
+        # looks like it does nothing.
+        self.switch_view(VIEW_INDEX.get(config.default_view, 0))
         self.refresh()
 
     # ------------------------------------------------------------------ chrome

@@ -17,7 +17,15 @@ import pytest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-pytest.importorskip("PySide6.QtWidgets", reason="PySide6 cannot be imported here")
+# exc_type is not optional here: since pytest 8.2 importorskip only skips on
+# ModuleNotFoundError, and PySide6 failing for want of libGL.so.1 raises a plain
+# ImportError — which would abort collection on exactly the headless machine
+# this skip exists for.
+pytest.importorskip(
+    "PySide6.QtWidgets",
+    reason="PySide6 cannot be imported here",
+    exc_type=ImportError,
+)
 
 from PySide6.QtWidgets import QApplication
 
@@ -81,9 +89,98 @@ def test_the_default_view_comes_from_config(qapp, conn, calendar_id, db_path):
     win = MainWindow(config, conn, db_path)
     try:
         assert win.stack.currentIndex() == 1
+        # The selector has to agree with the stack, or the first switch back is
+        # a no-op: the combo already reads "List" while Kanban is on screen.
+        assert win.view_selector.currentText() == "Kanban"
     finally:
         win.sync.stop()
         win._poll.stop()
+
+
+# -------------------------------------------------------------- kanban filter
+
+
+def _kanban(window):
+    window.switch_view(1)
+    return window.kanban_view
+
+
+def _tick(button, values):
+    for action in button._checkable_actions():
+        action.setChecked(action.data() in values)
+
+
+def _shown(kanban):
+    return sum(kanban.lists[c].count() for c in kanban.lists)
+
+
+def test_the_filter_offers_every_calendar_and_only_tags_in_use(
+    window, make_task, calendar_id, other_calendar_id
+):
+    cache.create_task_local(make_task("t1", categories=["home"]), window.conn)
+    kanban = _kanban(window)
+    assert set(kanban.filter_bar.calendars._entries) == {calendar_id, other_calendar_id}
+    assert list(kanban.filter_bar.tags._entries) == ["home"]
+
+
+def test_filtering_by_several_calendars(window, make_task, calendar_id, other_calendar_id):
+    cache.create_task_local(make_task("t1", summary="here"), window.conn)
+    cache.create_task_local(
+        make_task("t2", summary="there", calendar_id=other_calendar_id), window.conn
+    )
+    kanban = _kanban(window)
+    assert _shown(kanban) == 2
+
+    _tick(kanban.filter_bar.calendars, {calendar_id})
+    assert _shown(kanban) == 1
+    assert kanban.filter_bar.calendars.text() != "Lists: all"
+
+    _tick(kanban.filter_bar.calendars, {calendar_id, other_calendar_id})
+    # Everything ticked is the same as nothing ticked, and must not read as a
+    # filter — otherwise "Select all" looks like it hid something.
+    assert _shown(kanban) == 2
+    assert not kanban.filter.is_active
+
+
+def test_filtering_by_tag_and_by_text(window, make_task):
+    cache.create_task_local(make_task("t1", summary="milk", categories=["shop"]), window.conn)
+    cache.create_task_local(make_task("t2", summary="report"), window.conn)
+    kanban = _kanban(window)
+
+    _tick(kanban.filter_bar.tags, {"shop"})
+    assert _shown(kanban) == 1
+
+    kanban.filter_bar.clear()
+    assert _shown(kanban) == 2
+
+    kanban.filter_bar.text.setText("repo")
+    assert _shown(kanban) == 1
+
+
+def test_picking_every_tag_still_hides_the_untagged(window, make_task):
+    """Unlike calendars, "all tags" is a real filter: it means "has a tag"."""
+    cache.create_task_local(make_task("t1", categories=["a"]), window.conn)
+    cache.create_task_local(make_task("t2", categories=["b"]), window.conn)
+    cache.create_task_local(make_task("t3"), window.conn)
+    kanban = _kanban(window)
+
+    _tick(kanban.filter_bar.tags, {"a", "b"})
+    assert _shown(kanban) == 2
+
+
+def test_a_refresh_does_not_destroy_the_open_menus_actions(window, make_task):
+    """Ticking a box refreshes the board, and the refresh repopulates the very
+    menu the tick came from.  Rebuilding it there would delete the QAction
+    mid-signal — a hard crash, not a redraw."""
+    cache.create_task_local(make_task("t1"), window.conn)
+    kanban = _kanban(window)
+    before = kanban.filter_bar.calendars._checkable_actions()
+
+    kanban.refresh()
+    kanban.refresh()
+
+    after = kanban.filter_bar.calendars._checkable_actions()
+    assert [a.data() for a in before] == [a.data() for a in after]
 
 
 def test_switching_views_refreshes(window, make_task):

@@ -178,6 +178,20 @@ PASS gpg-key[work]  1A2B3C4D5E6F0003! encrypts to 1A2B3C4D5E6F0003 (on a smartca
 
 If you later rotate that subkey, open Preferences and set the password again.
 
+### Filtering the board
+
+The kanban board filters on three axes at once: which **lists** (pick several),
+which **tags** (pick several, matched `any` or `all`), and a free-text substring
+over the summary and description. **Reset** clears all three.
+
+Ticking every list is the same as ticking none — every task is in exactly one
+list, so that is no restriction and the button says "all". Tags do not work that
+way: a task may carry none, so ticking every tag still means "has a tag" and
+keeps filtering. Only tags actually in use are offered.
+
+The filter is not saved. It is how you are looking at the board right now, not a
+setting — the same reasoning as *show completed*.
+
 The full config reference — kanban columns, key bindings, MCP — is in
 [HLD.md §16](HLD.md).
 

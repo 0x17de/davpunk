@@ -9,3 +9,6 @@ build/
 .ruff_cache/
 .coverage
 htmlcov/
+
+# Machine-specific MCP client wiring (absolute paths, sometimes a token)
+.mcp.json

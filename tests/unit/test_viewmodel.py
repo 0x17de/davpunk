@@ -186,6 +186,95 @@ def test_the_board_has_a_lane_per_column():
     assert [t.uid for t in board["done"]] == ["a"]
 
 
+# ------------------------------------------------------------------ filtering
+
+
+def test_an_empty_filter_shows_everything():
+    """Empty means "no restriction", not "show nothing" — a fresh board is full."""
+    tasks = [task("a"), task("b")]
+    assert vm.apply_filter(tasks, vm.TaskFilter()) == tasks
+    assert not vm.TaskFilter().is_active
+
+
+def test_filtering_by_one_calendar():
+    tasks = [task("a", calendar_id="one"), task("b", calendar_id="two")]
+    kept = vm.apply_filter(tasks, vm.TaskFilter(calendar_ids=frozenset({"one"})))
+    assert [t.uid for t in kept] == ["a"]
+
+
+def test_filtering_by_several_calendars_keeps_all_of_them():
+    """The multi-select case: three lists means the union, not an intersection."""
+    tasks = [task(c, calendar_id=c) for c in ("one", "two", "three")]
+    kept = vm.apply_filter(tasks, vm.TaskFilter(calendar_ids=frozenset({"one", "three"})))
+    assert {t.uid for t in kept} == {"one", "three"}
+
+
+def test_tags_default_to_any_of_them():
+    tasks = [task("a", categories=["home"]), task("b", categories=["work"]), task("c")]
+    kept = vm.apply_filter(tasks, vm.TaskFilter(tags=frozenset({"home", "work"})))
+    assert {t.uid for t in kept} == {"a", "b"}
+
+
+def test_match_all_tags_requires_every_one():
+    """ "shopping and urgent" is a different question from "shopping or urgent"."""
+    both = task("both", categories=["home", "urgent"])
+    one = task("one", categories=["home"])
+    flt = vm.TaskFilter(tags=frozenset({"home", "urgent"}), match_all_tags=True)
+    assert [t.uid for t in vm.apply_filter([both, one], flt)] == ["both"]
+
+
+def test_a_task_with_extra_tags_still_matches_match_all():
+    task_ = task("a", categories=["home", "urgent", "later"])
+    flt = vm.TaskFilter(tags=frozenset({"home", "urgent"}), match_all_tags=True)
+    assert vm.apply_filter([task_], flt) == [task_]
+
+
+def test_text_matches_summary_and_description_case_insensitively():
+    tasks = [
+        task("a", summary="Buy a Bagger"),
+        task("b", description="the bagger is red"),
+        task("c", summary="unrelated"),
+    ]
+    assert {t.uid for t in vm.apply_filter(tasks, vm.TaskFilter(text="BAGGER"))} == {"a", "b"}
+
+
+def test_whitespace_only_text_is_not_a_filter():
+    assert not vm.TaskFilter(text="   ").is_active
+    assert vm.apply_filter([task("a")], vm.TaskFilter(text="   ")) == [task("a")]
+
+
+def test_the_axes_combine():
+    tasks = [
+        task("a", calendar_id="one", categories=["home"], summary="milk"),
+        task("b", calendar_id="one", categories=["work"], summary="milk"),
+        task("c", calendar_id="two", categories=["home"], summary="milk"),
+        task("d", calendar_id="one", categories=["home"], summary="bread"),
+    ]
+    flt = vm.TaskFilter(calendar_ids=frozenset({"one"}), tags=frozenset({"home"}), text="milk")
+    assert [t.uid for t in vm.apply_filter(tasks, flt)] == ["a"]
+
+
+def test_available_tags_are_sorted_deduplicated_and_only_those_in_use():
+    tasks = [task("a", categories=["work", "home"]), task("b", categories=["home"])]
+    assert vm.available_tags(tasks) == ["home", "work"]
+
+
+def test_the_board_filters_before_it_groups():
+    tasks = [
+        task("a", calendar_id="one", status=Status.COMPLETED),
+        task("b", calendar_id="two", status=Status.COMPLETED),
+    ]
+    board = vm.kanban_board(tasks, COLUMNS, vm.TaskFilter(calendar_ids=frozenset({"one"})))
+    assert [t.uid for t in board["done"]] == ["a"]
+
+
+def test_describe_names_a_single_list_but_counts_several():
+    names = {"one": "Shopping", "two": "Work"}
+    assert vm.TaskFilter(calendar_ids=frozenset({"one"})).describe(names) == "Shopping"
+    assert vm.TaskFilter(calendar_ids=frozenset({"one", "two"})).describe(names) == "2 lists"
+    assert vm.TaskFilter().describe(names) == "No filter"
+
+
 # --------------------------------------------------------------------- trees
 
 
