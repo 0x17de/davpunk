@@ -110,6 +110,69 @@ def _dry_run(remotes, args) -> int:
     return 1 if failed else 0
 
 
+# ------------------------------------------------------------------- forget
+
+
+def cmd_forget(args) -> int:
+    """Drop an orphaned remote from the cache.
+
+    ``reconcile_remotes`` deliberately hides a remote whose config block has
+    gone rather than purging it, so a typo in ``config.toml`` cannot cost data.
+    The consequence is that removing an account leaves a row behind for ever,
+    and until now there was no supported way to get rid of it —
+    ``cache.purge_remote`` existed with no caller at all.
+    """
+    try:
+        config, conn = _open(args)
+    except ConfigError as exc:
+        print(f"davpunk: {exc}", file=sys.stderr)
+        return 2
+
+    try:
+        remote_id = args.remote_id
+        known = {row["remote_id"]: row for row in cache.sync_status_rows(conn)}
+        if remote_id not in known:
+            print(f"davpunk: no remote named {remote_id!r} in the cache", file=sys.stderr)
+            orphans = [r for r, row in known.items() if row["orphaned"]]
+            if orphans:
+                print(f"  orphaned remotes: {', '.join(sorted(orphans))}", file=sys.stderr)
+            return 2
+
+        if any(r.id == remote_id for r in config.remotes):
+            # Purging it would only bring it straight back: every process
+            # re-upserts its configured remotes at startup.
+            print(
+                f"davpunk: {remote_id!r} is still in config.toml — remove its "
+                "[[davpunk.remotes]] block first, or it will reappear on the next start",
+                file=sys.stderr,
+            )
+            return 2
+
+        tasks = _cached_task_count(remote_id, conn)
+        what = f"{tasks} cached task(s)" if tasks else "no cached tasks"
+        if not args.yes:
+            print(f"Forget {remote_id!r} and its {what}? This cannot be undone.")
+            if input("Type the remote id to confirm: ").strip() != remote_id:
+                print("Cancelled.")
+                return 1
+
+        destroyed = cache.purge_remote(remote_id, conn)
+        print(f"Forgot {remote_id!r} ({destroyed} task(s) destroyed).")
+        return 0
+    finally:
+        cache.close_db(conn)
+
+
+def _cached_task_count(remote_id: str, conn) -> int:
+    return int(
+        conn.execute(
+            "SELECT COUNT(*) FROM tasks t JOIN calendars c ON c.id = t.calendar_id "
+            "WHERE c.remote_id = ?",
+            (remote_id,),
+        ).fetchone()[0]
+    )
+
+
 # ------------------------------------------------------------------- status
 
 

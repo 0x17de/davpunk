@@ -38,6 +38,10 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     sub.add_parser("status", help="per-remote sync state and pending counts")
+
+    forget = sub.add_parser("forget", help="drop an orphaned remote and its cached tasks")
+    forget.add_argument("remote_id", help="the remote id, as shown by `davpunk status`")
+    forget.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     sub.add_parser("conflicts", help="list open conflicts (read-only)")
 
     doctor = sub.add_parser("doctor", help="check every runtime assumption")
@@ -62,6 +66,8 @@ def main(argv: list[str] | None = None) -> int:
         return commands.cmd_sync(args)
     if args.command == "status":
         return commands.cmd_status(args)
+    if args.command == "forget":
+        return commands.cmd_forget(args)
     if args.command == "conflicts":
         return commands.cmd_conflicts(args)
     if args.command == "doctor":

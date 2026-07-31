@@ -229,10 +229,28 @@ davpunk                      # the UI (single instance; --new-instance to overri
 davpunk sync [--remote ID]   # one sync cycle, then a summary
 davpunk status               # per-remote: last sync, pending / blocked / conflicts
 davpunk conflicts            # list open conflicts (resolution is a UI action)
+davpunk forget ID            # drop an orphaned account and its cached tasks
 davpunk doctor [--fix]       # every runtime assumption, checked
 davpunk-sync                 # the background sync daemon
 davpunk-mcp                  # the MCP server (all capabilities off by default)
 ```
+
+### Removing an account
+
+Deleting an account's `[[davpunk.remotes]]` block does **not** remove its cached
+tasks. DavPunk hides the account rather than purging it, so a typo in
+`config.toml` cannot cost you data — `davpunk status` keeps listing it as
+`[orphaned]`, with whatever error it last saw.
+
+To get rid of it for good, once you are sure:
+
+```sh
+davpunk forget ox-privat      # prompts, and asks you to type the id back
+davpunk forget ox-privat --yes
+```
+
+It refuses an account that is still in `config.toml`, since every process
+re-creates its configured remotes at startup and it would simply come back.
 
 ### Trying a sync without doing it
 

@@ -1058,6 +1058,19 @@ actually in use are offered, so the picker cannot offer a dead one. The filter
 applies before columns are assigned, and each column header shows the count it
 is currently displaying.
 
+### 14.6a Forgetting a remote
+
+`reconcile_remotes` marks a remote whose config block has gone as `orphaned`
+rather than deleting it: cached tasks are never destroyed by a config read, so
+a typo cannot cost data. The cost is that the row, its `sync_status`
+and its last error survive for ever, visible only in `davpunk status`.
+
+`davpunk forget ID` is the explicit act that closes that loop. It refuses a
+remote still named in `config.toml` — the next startup would re-upsert it — and
+requires the id to be typed back rather than a y/n, because it is irreversible.
+`sync_status` and `calendars` (and through them `tasks`) go with it by
+`ON DELETE CASCADE`.
+
 ### 14.7 Automatic sync
 
 Only the daemon syncs on a timer. The UI's 2 s poll reads the local cache and

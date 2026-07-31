@@ -352,7 +352,7 @@ def _systemd_checks() -> Iterator[Check]:
             "systemd-unit",
             Status.WARN,
             f"davpunk-sync.service is {state or 'not installed'} "
-            "(the daemon is optional; the UI syncs on its own)",
+            "— nothing will sync on a timer; the UI syncs only when you ask it to",
         )
 
 

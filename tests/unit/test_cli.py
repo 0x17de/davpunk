@@ -299,3 +299,70 @@ def test_status_marks_an_account_that_only_syncs_on_demand(cli, capsys, config_f
 
     assert cli("status") == 0
     assert "manual only" in capsys.readouterr().out
+
+
+# ------------------------------------------------------------------- forget
+
+
+@pytest.fixture
+def orphan(cli, config_file):
+    """A remote in the cache that config.toml no longer mentions."""
+    from davpunk import paths
+    from davpunk.models.remote import Remote
+
+    conn = cache.open_db(paths.database_file())
+    cache.reconcile_remotes(
+        [
+            Remote(id="work", url="https://cal.example.test/dav/"),
+            Remote(id="gone", url="https://g/"),
+        ],
+        conn,
+    )
+    # A second pass with only the configured remote is what marks it orphaned.
+    cache.reconcile_remotes([Remote(id="work", url="https://cal.example.test/dav/")], conn)
+    cache.close_db(conn)
+    return "gone"
+
+
+def test_forget_drops_an_orphaned_remote(cli, capsys, orphan):
+    assert cli("forget", orphan, "--yes") == 0
+    assert "Forgot 'gone'" in capsys.readouterr().out
+
+    from davpunk import paths
+
+    conn = cache.open_db(paths.database_file())
+    try:
+        assert [r["remote_id"] for r in cache.sync_status_rows(conn)] == ["work"]
+    finally:
+        cache.close_db(conn)
+
+
+def test_forget_refuses_a_remote_that_is_still_configured(cli, capsys, orphan):
+    """Purging it would only bring it back on the next start."""
+    assert cli("forget", "work", "--yes") == 2
+    assert "still in config.toml" in capsys.readouterr().err
+
+
+def test_forget_names_the_orphans_when_the_id_is_wrong(cli, capsys, orphan):
+    assert cli("forget", "typo", "--yes") == 2
+    err = capsys.readouterr().err
+    assert "no remote named 'typo'" in err
+    assert "orphaned remotes: gone" in err
+
+
+def test_forget_without_yes_requires_the_id_to_be_typed_back(cli, capsys, orphan, monkeypatch):
+    """A y/n prompt is too easy to answer wrong for something irreversible."""
+    monkeypatch.setattr("builtins.input", lambda *_a: "not-the-id")
+    assert cli("forget", orphan) == 1
+    assert "Cancelled." in capsys.readouterr().out
+
+    monkeypatch.setattr("builtins.input", lambda *_a: orphan)
+    assert cli("forget", orphan) == 0
+
+
+def test_forget_says_how_many_tasks_it_would_destroy(cli, capsys, orphan, monkeypatch):
+    """The count has to be in the prompt, not only in the result."""
+    seen = []
+    monkeypatch.setattr("builtins.input", lambda *_a: seen.append(1) or orphan)
+    cli("forget", orphan)
+    assert "no cached tasks" in capsys.readouterr().out
