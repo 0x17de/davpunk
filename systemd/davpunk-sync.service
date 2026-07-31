@@ -1,0 +1,48 @@
+[Unit]
+Description=DavPunk CalDAV sync daemon
+Documentation=https://github.com/mh/DavPunk
+# Best-effort: the daemon copes with the network coming and going on its own.
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/davpunk-sync
+Restart=on-failure
+RestartSec=30
+
+# SIGTERM sets the cancel event; the current item finishes, the per-remote
+# flock releases, and the daemon exits 0.  30 s is generous for one item.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+# The daemon inherits the standard GnuPG environment and never forces a
+# pinentry, so it is only functional while gpg-agent still holds the
+# passphrase.  If syncs stop with "credentials locked", raise the agent's
+# cache lifetimes in ~/.gnupg/gpg-agent.conf, for example:
+#
+#     default-cache-ttl 28800
+#     max-cache-ttl     86400
+#
+# For a daemon that should run without a login session, `loginctl
+# enable-linger $USER` works — but be aware it makes the agent-cache problem
+# worse, not better: there is no session to unlock the key in.
+
+# Logging goes to stderr, which systemd routes to the journal.
+StandardOutput=null
+StandardError=journal
+
+# The daemon only ever touches its own XDG directories and the network.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/davpunk %h/.local/state/davpunk %t
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+
+[Install]
+WantedBy=default.target

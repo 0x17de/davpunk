@@ -1,0 +1,214 @@
+"""Packaging: entrypoints, modes, and the systemd unit.  [Step 18]"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+import tomllib
+from pathlib import Path
+
+import pytest
+
+ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.fixture(scope="module")
+def pyproject() -> dict:
+    with (ROOT / "pyproject.toml").open("rb") as handle:
+        return tomllib.load(handle)
+
+
+# --------------------------------------------------------------- entrypoints
+
+
+def test_the_three_documented_scripts_are_declared(pyproject):
+    scripts = pyproject["project"]["scripts"]
+    assert scripts == {
+        "davpunk": "davpunk.__main__:main",
+        "davpunk-sync": "davpunk.daemon.sync_daemon:main",
+        "davpunk-mcp": "davpunk.mcp.server:main",
+    }
+
+
+@pytest.mark.parametrize(
+    "target",
+    ["davpunk.__main__:main", "davpunk.daemon.sync_daemon:main", "davpunk.mcp.server:main"],
+)
+def test_every_entrypoint_resolves(target):
+    module_name, _, attribute = target.partition(":")
+    module = __import__(module_name, fromlist=[attribute])
+    assert callable(getattr(module, attribute))
+
+
+def test_the_runtime_floor_is_declared(pyproject):
+    assert pyproject["project"]["requires-python"] == ">=3.11"
+
+
+def test_the_ui_is_an_extra_not_a_hard_dependency(pyproject):
+    """The CLI and the daemon must install on a machine with no Qt."""
+    hard = " ".join(pyproject["project"]["dependencies"]).lower()
+    assert "pyside6" not in hard
+    assert "PySide6>=6.7" in pyproject["project"]["optional-dependencies"]["ui"][0]
+
+
+def test_mcp_is_an_extra_too(pyproject):
+    hard = " ".join(pyproject["project"]["dependencies"]).lower()
+    assert not any(d == "mcp" or d.startswith("mcp>") for d in hard.split())
+    assert pyproject["project"]["optional-dependencies"]["mcp"]
+
+
+# ---------------------------------------------------------------- entrypoints
+
+
+def _run(*argv, home: Path, timeout: int = 120) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, "-m", *argv],
+        capture_output=True,
+        text=True,
+        timeout=timeout,
+        env={**os.environ, "DAVPUNK_HOME": str(home)},
+        cwd=ROOT,
+    )
+
+
+@pytest.fixture
+def config_file(davpunk_home) -> Path:
+    from davpunk import paths
+
+    paths.ensure_dir(paths.config_dir())
+    path = paths.config_file()
+    path.write_text(
+        "[davpunk]\ntheme = 'dark'\n\n"
+        "[[davpunk.remotes]]\n"
+        "id = 'work'\nurl = 'https://cal.example.test/dav/'\nusername = 'u'\n"
+    )
+    path.chmod(0o600)
+    return path
+
+
+def test_davpunk_status_runs_as_a_module(davpunk_home, config_file):
+    result = _run("davpunk", "--config", str(config_file), "status", home=davpunk_home)
+    assert result.returncode == 0, result.stderr
+    assert "work" in result.stdout
+
+
+def test_davpunk_doctor_runs_as_a_module(davpunk_home, config_file):
+    result = _run("davpunk", "--config", str(config_file), "doctor", home=davpunk_home)
+    assert "python" in result.stdout
+    assert result.returncode in (0, 1)  # 1 when a check legitimately fails
+
+
+def test_the_daemon_runs_one_pass_and_exits(davpunk_home, config_file):
+    result = _run(
+        "davpunk.daemon.sync_daemon", "--config", str(config_file), "--once", home=davpunk_home
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_the_mcp_server_refuses_to_start_when_disabled(davpunk_home, config_file):
+    result = _run("davpunk.mcp.server", "--config", str(config_file), home=davpunk_home)
+    assert result.returncode == 2
+    assert "enabled = true" in result.stderr
+
+
+def test_no_entrypoint_writes_to_stdout_when_logging(davpunk_home, config_file):
+    """stdout is the MCP stdio protocol channel."""
+    result = _run(
+        "davpunk.daemon.sync_daemon", "--config", str(config_file), "--once", home=davpunk_home
+    )
+    assert result.stdout == ""
+    assert result.stderr  # the log went to stderr, where it belongs
+
+
+def test_mcp_print_token_is_the_only_stdout_writer(davpunk_home, config_file):
+    result = _run(
+        "davpunk.mcp.server", "--config", str(config_file), "--print-token", home=davpunk_home
+    )
+    assert result.returncode == 0
+    assert result.stdout.strip()
+    assert "INFO" not in result.stdout  # a token, not a log line
+
+
+# ---------------------------------------------------------------- file modes
+
+
+def test_the_credentials_directory_is_created_0700(davpunk_home):
+    from davpunk import paths
+
+    paths.ensure_runtime_dirs()
+    assert paths.credentials_dir().stat().st_mode & 0o077 == 0
+
+
+def test_the_mcp_token_is_created_0600(davpunk_home):
+    from davpunk import paths
+    from davpunk.mcp.server import ensure_token
+
+    ensure_token(paths.mcp_token_file())
+    assert paths.mcp_token_file().stat().st_mode & 0o077 == 0
+
+
+def test_lock_files_are_created_0600(davpunk_home):
+    from davpunk import paths
+    from davpunk.core.locking import remote_sync_lock
+
+    with remote_sync_lock("work"):
+        assert paths.remote_lock_file("work").stat().st_mode & 0o077 == 0
+
+
+# ------------------------------------------------------------------ systemd
+
+
+@pytest.fixture(scope="module")
+def unit_text() -> str:
+    return (ROOT / "systemd" / "davpunk-sync.service").read_text()
+
+
+def test_the_unit_uses_the_installed_script(unit_text):
+    assert "davpunk-sync" in unit_text
+
+
+def test_the_unit_honours_the_shutdown_contract(unit_text):
+    """SIGTERM sets the cancel event; the current item finishes."""
+    assert "KillSignal=SIGTERM" in unit_text
+    assert "TimeoutStopSec=30" in unit_text
+
+
+def test_the_unit_documents_the_gpg_agent_caveat(unit_text):
+    """"""
+    assert "gpg-agent.conf" in unit_text
+    assert "default-cache-ttl" in unit_text
+    assert "enable-linger" in unit_text
+
+
+def test_the_unit_routes_stderr_to_the_journal_and_discards_stdout(unit_text):
+    assert "StandardError=journal" in unit_text
+    assert "StandardOutput=null" in unit_text
+
+
+def test_the_unit_is_a_user_unit(unit_text):
+    assert "WantedBy=default.target" in unit_text
+    assert "%h" in unit_text  # $HOME expansion, i.e. per-user
+
+
+def test_the_installer_is_executable():
+    installer = ROOT / "systemd" / "install.sh"
+    assert installer.exists()
+    assert installer.stat().st_mode & 0o111
+
+
+# ------------------------------------------------------------------- README
+
+
+def test_the_readme_documents_every_command():
+    readme = (ROOT / "README.md").read_text()
+    for command in ("davpunk sync", "davpunk status", "davpunk conflicts", "davpunk doctor"):
+        assert command in readme
+    assert "davpunk-sync" in readme
+    assert "davpunk-mcp" in readme
+
+
+def test_the_hld_exists_and_covers_the_schema_revision():
+    hld = (ROOT / "HLD.md").read_text()
+    assert "rev 8" in hld or "revision **8**" in hld
+    assert "task_ref" in hld
