@@ -1058,7 +1058,25 @@ actually in use are offered, so the picker cannot offer a dead one. The filter
 applies before columns are assigned, and each column header shows the count it
 is currently displaying.
 
-### 14.7 Dry run
+### 14.7 Automatic sync
+
+Only the daemon syncs on a timer. The UI's 2 s poll reads the local cache and
+probes the flock; it never initiates a cycle. Syncing from the UI is always an
+explicit act.
+
+`auto_sync` (per remote, default `true`) removes an account from the daemon's
+timer and nothing else. Off does not mean "never sync": `davpunk sync`, *Sync
+now* and MCP `sync_now` are all things the user asked for and keep working. An
+excluded remote is still reconciled into the cache — its rows, credentials and
+tasks are unaffected — and `davpunk status` labels it `[manual only]`, because
+otherwise a long-stale `last_sync` is indistinguishable from a fault. With no
+remote auto-syncing the daemon still runs, since the alarm scan is independent
+of any remote.
+
+The interval field is disabled in the UI when `auto_sync` is off: a live
+interval beside a disabled toggle reads as "something is still syncing".
+
+### 14.8 Dry run
 
 `sync --dry-run` and **File → Preview sync…** report what a cycle would do and
 write nothing. The guarantee is enforced at the two boundaries a sync can write

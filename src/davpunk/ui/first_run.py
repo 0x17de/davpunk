@@ -182,6 +182,8 @@ def write_remote(config_path: Path, values: dict) -> Path:
     entry["gpg_file"] = str(paths.credential_file(values["id"]))
     if values.get("gpg_key_id"):
         entry["gpg_key_id"] = values["gpg_key_id"]
+    if not values.get("auto_sync", True):
+        entry["auto_sync"] = False
     entry["sync_interval"] = values["sync_interval"]
     if values.get("color"):
         entry["color"] = values["color"]

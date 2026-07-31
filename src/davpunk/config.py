@@ -208,6 +208,10 @@ class RemoteConfig(BaseModel):
     username: str | None = None
     gpg_file: str | None = None
     gpg_key_id: str | None = None
+    #: Sync this account in the background.  Off does not mean "never sync":
+    #: `davpunk sync`, the toolbar button and MCP `sync_now` are explicit acts
+    #: and still work.  It means "not behind my back, on a timer".
+    auto_sync: bool = True
     sync_interval: int = 300
     color: str | None = None
     pinned_view: bool = False
@@ -262,6 +266,7 @@ class RemoteConfig(BaseModel):
             username=self.username,
             gpg_file=str(self.resolved_gpg_file()),
             gpg_key_id=self.gpg_key_id,
+            auto_sync=self.auto_sync,
             sync_interval=self.sync_interval,
             color=self.color,
             pinned_view=self.pinned_view,

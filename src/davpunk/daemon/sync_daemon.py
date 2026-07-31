@@ -43,12 +43,27 @@ class SyncDaemon:
         self.cancel.set()
 
     def run(self) -> int:
-        remotes = [r for r in self.config.remotes]
-        if not remotes:
+        configured = list(self.config.remotes)
+        if not configured:
             log.error("No remotes configured; nothing to sync")
             return 1
 
-        cache.reconcile_remotes(remotes, self.conn)
+        # Reconcile *every* remote, including the ones this daemon will not
+        # touch: their rows, credentials and tasks are still theirs, and an
+        # account is excluded from the timer, not from the cache.
+        cache.reconcile_remotes(configured, self.conn)
+
+        remotes = [r for r in configured if r.auto_sync]
+        excluded = [r.id for r in configured if not r.auto_sync]
+        if excluded:
+            log.info(
+                "Not auto-syncing %s (auto_sync = false); sync them with "
+                "`davpunk sync --remote ID` or from the UI",
+                ", ".join(excluded),
+            )
+        if not remotes:
+            # Still worth running: alarms are scanned regardless of any remote.
+            log.warning("No remote has auto_sync enabled; only alarms will be scanned")
         log.info("Watching %d remote(s)", len(remotes))
 
         while not self.cancel.is_set():

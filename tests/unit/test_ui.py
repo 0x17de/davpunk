@@ -994,7 +994,7 @@ def test_every_form_field_carries_an_explanation(qapp, davpunk_home):
 
     form = RemoteForm()
     tips = {b.toolTip() for b in form.findChildren(QLabel) if b.text() == "?"}
-    for key in ("id", "url", "username", "gpg_key", "sync_interval", "name", "color"):
+    for key in ("id", "url", "username", "gpg_key", "sync_interval", "name", "color", "auto_sync"):
         assert HELP[key] in tips, key
 
 
@@ -1348,3 +1348,40 @@ def test_the_preview_reports_a_failure_rather_than_pretending(window, monkeypatc
     window.sync.worker.dry_run_all()
 
     assert seen and "server on fire" in seen[0][1]
+
+
+# ----------------------------------------------------------- automatic sync
+
+
+def test_automatic_sync_is_on_by_default_and_round_trips(qapp, davpunk_home):
+    from davpunk.ui.remote_form import RemoteForm
+
+    assert RemoteForm().values()["auto_sync"] is True
+
+    form = RemoteForm({"id": "work", "url": "https://x.test/", "auto_sync": False}, editing=True)
+    assert form.auto_sync.isChecked() is False
+    assert form.values()["auto_sync"] is False
+
+
+def test_the_interval_is_disabled_when_nothing_will_use_it(qapp, davpunk_home):
+    """A live interval next to a disabled toggle reads as "still syncing"."""
+    from davpunk.ui.remote_form import RemoteForm
+
+    form = RemoteForm()
+    assert form.interval.isEnabled()
+
+    form.auto_sync.setChecked(False)
+    assert not form.interval.isEnabled()
+
+    form.auto_sync.setChecked(True)
+    assert form.interval.isEnabled()
+
+
+def test_the_poll_never_starts_a_sync(window, monkeypatch):
+    """The UI syncs only when asked.  Pinned here because the README claimed
+    the opposite for a while, and only the code settles it."""
+    monkeypatch.setattr(
+        window.sync, "sync_all", lambda: pytest.fail("the poll must not contact a server")
+    )
+    for _ in range(3):
+        window._tick()

@@ -13,6 +13,7 @@ import logging
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QFormLayout,
     QLabel,
@@ -53,6 +54,12 @@ HELP = {
         "private half is available on this machine are listed, because GnuPG "
         "will happily encrypt to one you cannot decrypt with. If you later "
         "rotate this subkey, come back here and set the password again."
+    ),
+    "auto_sync": (
+        "Let the background daemon sync this account on a timer. Turning it "
+        "off does not cut the account off: Sync now, File → Preview sync and "
+        "`davpunk sync` all still work. It only stops DavPunk contacting this "
+        "server on its own."
     ),
     "sync_interval": (
         "How often to sync in the background. Edits are saved locally the "
@@ -100,10 +107,17 @@ class RemoteForm(QWidget):
         self.username = QLineEdit(values.get("username", ""))
         self.username.setPlaceholderText("you@example.com")
 
+        self.auto_sync = QCheckBox("Sync this account automatically")
+        self.auto_sync.setChecked(values.get("auto_sync", True))
+
         self.interval = QSpinBox()
         self.interval.setRange(30, 86400)
         self.interval.setValue(values.get("sync_interval", 300))
         self.interval.setSuffix(" seconds")
+        # An interval that governs nothing invites the reading that background
+        # syncing is still on somewhere.
+        self.auto_sync.toggled.connect(self.interval.setEnabled)
+        self.interval.setEnabled(self.auto_sync.isChecked())
 
         self.color = QLineEdit(values.get("color", "#4A9EFF"))
 
@@ -119,6 +133,7 @@ class RemoteForm(QWidget):
             ("Username", self.username, "username"),
             ("Encryption key", self.gpg_key, "gpg_key"),
             (None, self.skipped_note, None),
+            ("Automatic sync", self.auto_sync, "auto_sync"),
             ("Sync every", self.interval, "sync_interval"),
             ("Colour", self.color, "color"),
         ):
@@ -226,6 +241,7 @@ class RemoteForm(QWidget):
             "name": self.name.text().strip() or remote_id,
             "url": self.url.text().strip(),
             "username": self.username.text().strip(),
+            "auto_sync": self.auto_sync.isChecked(),
             "sync_interval": self.interval.value(),
             "color": self.color.text().strip(),
             "gpg_key_id": self.gpg_key.currentData(),

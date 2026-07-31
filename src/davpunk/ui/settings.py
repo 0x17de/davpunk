@@ -553,6 +553,7 @@ def write_settings(config_path, *, general: dict, remotes: list[dict], mcp: dict
             "username",
             "gpg_file",
             "gpg_key_id",
+            "auto_sync",
             "sync_interval",
             "color",
             "pinned_view",

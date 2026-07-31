@@ -21,6 +21,7 @@ class Remote(BaseModel):
     username: str | None = None
     gpg_file: str | None = None
     gpg_key_id: str | None = None
+    auto_sync: bool = True
     sync_interval: int = 300
     color: str | None = None
     pinned_view: bool = False

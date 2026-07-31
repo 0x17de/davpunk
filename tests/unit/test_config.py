@@ -198,3 +198,23 @@ def test_short_sync_interval_is_rejected(tmp_path):
     text = MINIMAL + "sync_interval = 5\n"
     with pytest.raises(ConfigError):
         load_config(write(tmp_path, text))
+
+
+def test_auto_sync_defaults_on_and_survives_the_round_trip_to_the_model():
+    from davpunk.config import RemoteConfig
+
+    assert RemoteConfig(id="a", url="https://x.test/").to_model().auto_sync is True
+    assert RemoteConfig(id="a", url="https://x.test/", auto_sync=False).to_model().auto_sync is (
+        False
+    )
+
+
+def test_auto_sync_is_read_from_the_toml(tmp_path):
+    from davpunk.config import load_config
+
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[davpunk]\n[[davpunk.remotes]]\nid = "work"\nurl = "https://x.test/"\nauto_sync = false\n'
+    )
+    path.chmod(0o600)
+    assert load_config(path).remotes[0].auto_sync is False

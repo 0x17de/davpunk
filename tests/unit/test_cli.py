@@ -289,3 +289,13 @@ def test_dry_run_reports_without_touching_anything(cli, capsys, monkeypatch, dav
 def test_the_parser_offers_dry_run_and_defaults_to_off():
     assert build_parser().parse_args(["sync"]).dry_run is False
     assert build_parser().parse_args(["sync", "--dry-run"]).dry_run is True
+
+
+def test_status_marks_an_account_that_only_syncs_on_demand(cli, capsys, config_file):
+    """ "last sync: never" on a manual account is not a fault, and must not read
+    like one."""
+    config_file.write_text(CONFIG + "auto_sync = false\n")
+    config_file.chmod(0o600)
+
+    assert cli("status") == 0
+    assert "manual only" in capsys.readouterr().out

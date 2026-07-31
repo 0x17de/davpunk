@@ -277,10 +277,28 @@ If a collection is skipped because its ctag has not moved, the report says so.
 ./systemd/install.sh
 ```
 
-The daemon is optional — the UI syncs on its own while it is open. Install it if
-you want tasks to keep syncing when the UI is closed. It can only work while
-`gpg-agent` still holds your passphrase; `davpunk doctor` will tell you when
-that is the problem.
+The daemon is the **only** thing that syncs on a timer. The UI does not sync by
+itself: it polls the local cache so it shows what the daemon pulls in, but it
+contacts a server only when you ask it to — *Sync now*, `Ctrl+R`, or *File →
+Preview sync…*. Without the daemon installed, nothing reaches your server until
+you press something.
+
+The daemon can only work while `gpg-agent` still holds your passphrase;
+`davpunk doctor` will tell you when that is the problem.
+
+#### Excluding an account
+
+```toml
+[[davpunk.remotes]]
+id        = "work"
+auto_sync = false          # default: true
+```
+
+or untick **Automatic sync** for that account in the wizard or under **Edit →
+Preferences**. The daemon then leaves that account alone; *Sync now*, `davpunk
+sync` and MCP `sync_now` all still work on it, because those are things you
+asked for. `davpunk status` marks such an account `[manual only]`, so a
+months-old "last sync" does not read as a fault.
 
 ### MCP
 

@@ -115,7 +115,7 @@ def _dry_run(remotes, args) -> int:
 
 def cmd_status(args) -> int:
     try:
-        _, conn = _open(args)
+        config, conn = _open(args)
     except ConfigError as exc:
         print(f"davpunk: {exc}", file=sys.stderr)
         return 2
@@ -126,12 +126,16 @@ def cmd_status(args) -> int:
             print("No remotes configured.")
             return 0
 
+        manual = {r.id for r in config.remotes if not r.auto_sync}
         for row in rows:
             remote_id = row["remote_id"]
             counts = _counts(remote_id, conn)
             flags = []
             if row["orphaned"]:
                 flags.append("orphaned")
+            if remote_id in manual:
+                # Otherwise "last sync: 6d ago" looks like a fault.
+                flags.append("manual only")
             if is_syncing(remote_id):  # a lock probe, never a DB column
                 flags.append("syncing")
 

@@ -142,3 +142,47 @@ def test_the_systemd_unit_matches_the_shutdown_contract():
     assert "enable-linger" in text
     # stdout is not a log sink anywhere in DavPunk.
     assert "StandardOutput=null" in text
+
+
+# ---------------------------------------------------------------- auto_sync
+
+
+def _configs(**overrides):
+    return DavPunkConfig(
+        remotes=[
+            RemoteConfig(id="work", url="https://a.test/dav/", sync_interval=30),
+            RemoteConfig(id="home", url="https://b.test/dav/", sync_interval=30, **overrides),
+        ]
+    )
+
+
+def test_a_remote_with_auto_sync_off_is_not_synced_on_the_timer(conn, monkeypatch):
+    synced = []
+    monkeypatch.setattr(SyncDaemon, "_sync_one", lambda _self, c: synced.append(c.id))
+
+    SyncDaemon(_configs(auto_sync=False), conn, once=True).run()
+
+    assert synced == ["work"]
+
+
+def test_an_excluded_remote_is_still_reconciled_into_the_cache(conn, monkeypatch):
+    """Excluded from the timer, not from the cache: its tasks are still yours."""
+    monkeypatch.setattr(SyncDaemon, "_sync_one", lambda _self, _c: None)
+
+    SyncDaemon(_configs(auto_sync=False), conn, once=True).run()
+
+    stored = {r["id"] for r in conn.execute("SELECT id FROM remotes")}
+    assert stored == {"work", "home"}
+
+
+def test_a_daemon_where_nothing_auto_syncs_still_runs_for_the_alarms(conn, monkeypatch):
+    """Exiting would silently stop alarm notifications too."""
+    scanned = []
+    monkeypatch.setattr(SyncDaemon, "_scan_alarms", lambda _self: scanned.append(1))
+    monkeypatch.setattr(SyncDaemon, "_sync_one", lambda _self, _c: pytest.fail("must not sync"))
+
+    config = DavPunkConfig(
+        remotes=[RemoteConfig(id="work", url="https://a.test/dav/", auto_sync=False)]
+    )
+    assert SyncDaemon(config, conn, once=True).run() == 0
+    assert scanned
