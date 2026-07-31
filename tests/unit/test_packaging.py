@@ -212,3 +212,80 @@ def test_the_hld_exists_and_covers_the_schema_revision():
     hld = (ROOT / "HLD.md").read_text()
     assert "rev 8" in hld or "revision **8**" in hld
     assert "task_ref" in hld
+
+
+# ---------------------------------------------------------------------- nix
+
+
+@pytest.fixture(scope="module")
+def flake_text() -> str:
+    return (ROOT / "flake.nix").read_text()
+
+
+def test_the_flake_exists_and_is_locked():
+    assert (ROOT / "flake.nix").exists()
+    assert (ROOT / "flake.lock").exists(), "an unlocked flake is not reproducible"
+
+
+def test_the_flake_exposes_both_package_variants(flake_text):
+    """A headless server should not have to build Qt."""
+    assert "davpunk-headless" in flake_text
+    assert "withUi = false" in flake_text
+    assert "withMcp = false" in flake_text
+
+
+def test_the_flake_exposes_the_modules(flake_text):
+    assert "nixosModules.default" in flake_text
+    assert "homeManagerModules.default" in flake_text
+
+
+def test_the_dev_shell_sets_up_qt(flake_text):
+    """PySide6 dlopen()s libGL at import; without this the UI tests do not run
+    at all on a non-FHS system."""
+    assert "LD_LIBRARY_PATH" in flake_text
+    assert "libglvnd" in flake_text
+    assert "QT_QPA_PLATFORM" in flake_text
+
+
+def test_the_dev_shell_provides_radicale(flake_text):
+    """The integration tests import it, and nixpkgs only ships it as an app."""
+    assert "toPythonModule pkgs.radicale" in flake_text
+
+
+def test_the_package_declares_gnupg_as_a_runtime_dependency():
+    """GnuPG is a binary dependency, not an optional nicety: DavPunk cannot
+    read a single credential without it."""
+    text = (ROOT / "nix" / "davpunk.nix").read_text()
+    assert "gnupg" in text
+    assert "wrapProgram" in text
+
+
+def test_the_package_wraps_the_ui_for_qt():
+    text = (ROOT / "nix" / "davpunk.nix").read_text()
+    assert "wrapQtAppsHook" in text
+    # wrapQtAppsHook reads qtPluginPrefix off qtbase and fails without it.
+    assert "qt6.qtbase" in text
+
+
+@pytest.mark.parametrize("module", ["nixos-module.nix", "home-module.nix"])
+def test_each_module_keeps_the_shutdown_contract(module):
+    """The unit has to outlast one item finishing."""
+    text = (ROOT / "nix" / module).read_text()
+    assert 'KillSignal = "SIGTERM"' in text
+    assert "TimeoutStopSec = 30" in text
+    assert 'StandardOutput = "null"' in text
+
+
+@pytest.mark.parametrize("module", ["nixos-module.nix", "home-module.nix"])
+def test_each_module_installs_a_user_service(module):
+    """Config, cache and credentials are per-user, and the daemon needs that
+    user's gpg-agent to decrypt anything."""
+    text = (ROOT / "nix" / module).read_text()
+    assert "systemd.user.services.davpunk-sync" in text
+
+
+def test_the_readme_documents_the_nix_entry_points():
+    readme = (ROOT / "README.md").read_text()
+    assert "nix develop" in readme
+    assert "nixosModules.default" in readme
+    assert "homeManagerModules.default" in readme
