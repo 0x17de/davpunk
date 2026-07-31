@@ -716,17 +716,96 @@ def test_the_account_id_cannot_be_changed_when_editing(qapp, davpunk_home):
 
 
 def test_every_form_field_carries_an_explanation(qapp, davpunk_home):
-    """The setup screen should not require you to already know CalDAV."""
+    """The setup screen should not require you to already know CalDAV.
+
+    The explanations are tooltips behind a ? badge rather than inline text:
+    printed inline they wrapped to two or three lines each, which overflowed
+    the wizard page and clipped every one of them.
+    """
+    from PySide6.QtWidgets import QLabel
+
     from davpunk.ui.remote_form import HELP, RemoteForm
 
     form = RemoteForm()
-    labels = [
-        w.text()
-        for w in form.findChildren(type(form.problem_label))
-        if w.text() and w is not form.problem_label
-    ]
-    for key in ("id", "url", "username", "gpg_key", "sync_interval"):
-        assert any(HELP[key][:40] in label for label in labels), key
+    tips = {b.toolTip() for b in form.findChildren(QLabel) if b.text() == "?"}
+    for key in ("id", "url", "username", "gpg_key", "sync_interval", "name", "color"):
+        assert HELP[key] in tips, key
+
+
+def test_every_field_has_a_question_mark_badge(qapp, davpunk_home):
+    """The badge is the only thing telling you a tooltip exists."""
+    from PySide6.QtWidgets import QLabel
+
+    from davpunk.ui.remote_form import HELP, RemoteForm
+
+    form = RemoteForm()
+    badges = [b for b in form.findChildren(QLabel) if b.text() == "?"]
+    assert len(badges) == len(HELP) - 1  # every field except the password
+    assert all(b.toolTip() for b in badges)
+
+
+def test_the_inputs_carry_the_help_too(qapp, davpunk_home):
+    """Hovering the field itself should work, not only the badge."""
+    from davpunk.ui.remote_form import RemoteForm
+
+    form = RemoteForm()
+    for widget in (form.remote_id, form.url, form.username, form.gpg_key, form.interval):
+        assert widget.toolTip()
+        assert widget.whatsThis()  # Shift+F1, i.e. reachable from the keyboard
+
+
+def test_no_label_is_clipped_or_truncated(qapp, davpunk_home):
+    """The reported bug: hints wrapped to three lines and overlapped the next
+    field. Checked at a deliberately narrow width."""
+    from PySide6.QtWidgets import QLabel
+
+    from davpunk.ui.remote_form import RemoteForm
+
+    form = RemoteForm()
+    form.resize(560, 400)
+    form.show()
+    QApplication.instance().processEvents()
+
+    for label in form.findChildren(QLabel):
+        if not label.isVisible() or not label.text():
+            continue
+        if label.wordWrap():
+            needed = label.heightForWidth(label.width())
+            assert needed <= label.height() + 1, f"clipped: {label.text()[:40]!r}"
+        else:
+            assert label.width() >= label.sizeHint().width(), f"truncated: {label.text()!r}"
+
+
+def test_a_field_label_keeps_its_full_text_when_narrow(qapp, davpunk_home):
+    """A container can be squeezed where a bare QFormLayout label cannot, and
+    the QLabel inside then silently renders "Encryption ke"."""
+    from PySide6.QtWidgets import QLabel
+
+    from davpunk.ui.widgets import help_label
+
+    widget = help_label("Encryption key", "some help")
+    label = next(child for child in widget.findChildren(QLabel) if child.text() != "?")
+    assert widget.minimumWidth() >= label.sizeHint().width()
+    assert label.minimumWidth() >= label.sizeHint().width()
+
+
+def test_a_stored_none_does_not_blank_a_defaulted_field(qapp, davpunk_home):
+    """model_dump() emits explicit None for anything unset, and dict.get only
+    falls back on a *missing* key — so editing an account wiped its colour."""
+    from davpunk.ui.remote_form import RemoteForm
+
+    form = RemoteForm(
+        {
+            "id": "work",
+            "url": "https://x.test/",
+            "username": "u",
+            "color": None,
+            "sync_interval": None,
+        },
+        editing=True,
+    )
+    assert form.color.text() == "#4A9EFF"
+    assert form.interval.value() == 300
 
 
 def test_the_url_help_names_real_servers(qapp):
@@ -737,13 +816,14 @@ def test_the_url_help_names_real_servers(qapp):
 
 
 def test_the_wizard_explains_what_it_will_ask_for(qapp, davpunk_home):
+    from PySide6.QtWidgets import QLabel
+
     from davpunk.ui.first_run import WelcomePage
 
     page = WelcomePage()
-    text = " ".join(
-        w.text() for w in page.findChildren(type(page.children()[1])) if hasattr(w, "text")
-    )
+    text = " ".join(w.text() for w in page.findChildren(QLabel))
     assert "GPG key" in text
+    assert "?" in text  # points at the affordance
     assert "Preferences" in text  # tells you it is all changeable later
 
 

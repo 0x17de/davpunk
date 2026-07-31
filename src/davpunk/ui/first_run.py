@@ -66,8 +66,8 @@ class WelcomePage(QWizardPage):
                 "  •  your CalDAV server's address\n"
                 "  •  the username and password you log in with\n"
                 "  •  a GPG key, which DavPunk uses to encrypt that password\n\n"
-                "Every field is explained on the next page, and you can change\n"
-                "all of it later under Edit → Preferences."
+                "Hover the ? beside any field on the next page to see what it\n"
+                "means, and change all of it later under Edit → Preferences."
             )
         )
 
@@ -80,7 +80,7 @@ class RemotePage(QWizardPage):
     def __init__(self) -> None:
         super().__init__()
         self.setTitle("Add an account")
-        self.setSubTitle("Where your tasks live. Every field is explained below it.")
+        self.setSubTitle("Where your tasks live. Hover the ? beside a field to see what it means.")
 
         layout = QVBoxLayout(self)
         self.form = RemoteForm()

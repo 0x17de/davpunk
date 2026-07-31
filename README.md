@@ -112,10 +112,11 @@ only the sync daemon should not need Qt installed.
 
 ## First run
 
-Launch `davpunk` with no config and the first-run wizard opens: remote details
+Launch `davpunk` with no config and the first-run wizard opens: account details
 (with `https://` enforced), a GPG key picker, a password prompt, and a
 `config.toml` written 0600 through `tomlkit` so any comments you add later
-survive.
+survive. Every field has a `?` beside it — hover for what it means and what
+happens if you get it wrong.
 
 To set it up by hand instead, write `~/.config/davpunk/config.toml`:
 

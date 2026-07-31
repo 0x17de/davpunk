@@ -937,8 +937,14 @@ active. Exit non-zero on any FAIL. `--fix` repairs file modes only.
 ### 14.4 Settings
 
 The first-run wizard and **Edit → Preferences** share one `RemoteForm`, so the
-two cannot drift apart, and every field carries a one-line explanation beneath
-it — a CalDAV URL, a GPG key id and a sync interval are not self-explanatory.
+two cannot drift apart. Every field carries an explanation on a `?` badge
+beside its label — a CalDAV URL, a GPG key id and a sync interval are not
+self-explanatory, but printing seven explanations inline cost two or three
+wrapped lines each, which overflowed the wizard page and clipped all of them.
+The same text is set as the field's tooltip and `whatsThis`, so hovering the
+input works and Shift+F1 reaches it from the keyboard. Inline text is reserved
+for what the user must *act* on: a validation problem, or a GPG subkey that was
+skipped.
 
 Preferences is reachable from the menu bar at all times. Config is read once at
 startup, so the dialog writes `config.toml` through **tomlkit** —

@@ -1,9 +1,10 @@
 """The remote details form, shared by the first-run wizard and settings.
 
-Every field carries a one-line explanation underneath it.  A CalDAV URL, a GPG
+Every field carries an explanation behind a ``?`` badge.  A CalDAV URL, a GPG
 key id and a sync interval are not self-explanatory, and a setup screen that
-just lists them leaves you guessing which of them matters and what happens if
-you get one wrong.
+just lists them leaves you guessing which of them matters — but printing all
+seven explanations inline cost two or three wrapped lines each, which is more
+vertical space than the wizard has, so every one of them was clipped.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ from PySide6.QtWidgets import (
 
 from davpunk import paths
 from davpunk.core import credentials
+from davpunk.ui.widgets import apply_help, help_label, hint
 
 log = logging.getLogger("davpunk.ui.remote_form")
 
@@ -61,13 +63,6 @@ HELP = {
 }
 
 
-def _hint(text: str) -> QLabel:
-    label = QLabel(text)
-    label.setWordWrap(True)
-    label.setStyleSheet("color: palette(mid); font-size: 11px;")
-    return label
-
-
 class RemoteForm(QWidget):
     """The fields for one remote, with live validation.
 
@@ -80,7 +75,9 @@ class RemoteForm(QWidget):
 
     def __init__(self, values: dict | None = None, *, editing: bool = False, parent=None) -> None:
         super().__init__(parent)
-        values = values or {}
+        # A stored remote carries explicit None for anything unset, so `.get`
+        # with a default is not enough — it only fires on a *missing* key.
+        values = {k: v for k, v in (values or {}).items() if v is not None}
         self._editing = editing
 
         outer = QVBoxLayout(self)
@@ -111,7 +108,7 @@ class RemoteForm(QWidget):
         self.color = QLineEdit(values.get("color", "#4A9EFF"))
 
         self.gpg_key = QComboBox()
-        self.skipped_note = _hint("")
+        self.skipped_note = hint("")
         self.skipped_note.hide()
         self._populate_keys(values.get("gpg_key_id"))
 
@@ -126,10 +123,12 @@ class RemoteForm(QWidget):
             ("Colour", self.color, "color"),
         ):
             if key is None:
-                form.addRow("", widget)
+                # Not a field: something the user may need to act on, so it
+                # stays visible rather than hiding behind a hover.  Spanning
+                # both columns keeps it to one line.
+                form.addRow(widget)
                 continue
-            form.addRow(label, widget)
-            form.addRow("", _hint(HELP[key]))
+            form.addRow(help_label(label, HELP[key]), apply_help(widget, HELP[key]))
 
         self.problem_label = QLabel()
         self.problem_label.setWordWrap(True)
@@ -153,7 +152,11 @@ class RemoteForm(QWidget):
             # another machine.
             self.skipped_note.setText(
                 "Not offered: "
-                + "; ".join(f"{k.short_id} ({credentials.describe_unusable(k)})" for k in skipped)
+                + ", ".join(k.short_id for k in skipped)
+                + f" — {credentials.describe_unusable(skipped[0])}"
+            )
+            self.skipped_note.setToolTip(
+                "\n".join(f"{k.short_id}: {credentials.describe_unusable(k)}" for k in skipped)
             )
             self.skipped_note.show()
 

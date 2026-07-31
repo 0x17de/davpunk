@@ -35,7 +35,8 @@ from PySide6.QtWidgets import (
 from davpunk import paths
 from davpunk.config import ConfigError, load_config
 from davpunk.core import credentials
-from davpunk.ui.remote_form import RemoteForm, _hint
+from davpunk.ui.remote_form import RemoteForm
+from davpunk.ui.widgets import apply_help, help_label, hint
 
 log = logging.getLogger("davpunk.ui.settings")
 
@@ -53,7 +54,7 @@ class RemoteDialog(QDialog):
         super().__init__(parent)
         self.editing = values is not None
         self.setWindowTitle("Edit account" if self.editing else "Add an account")
-        self.setMinimumWidth(620)
+        self.setMinimumWidth(660)
 
         layout = QVBoxLayout(self)
         self.form = RemoteForm(values, editing=self.editing)
@@ -63,13 +64,12 @@ class RemoteDialog(QDialog):
             "Change the stored password…" if self.editing else "Set the password…"
         )
         self.set_password.clicked.connect(self._prompt_password)
-        layout.addWidget(self.set_password)
-        layout.addWidget(
-            _hint(
-                "The password is encrypted with the key above and written to "
-                "its own file, mode 0600. Re-run this after changing the key."
-            )
+        apply_help(
+            self.set_password,
+            "The password is encrypted with the key above and written to its own "
+            "file, mode 0600. Run this again after changing the key.",
         )
+        layout.addWidget(self.set_password)
 
         self.buttons = QDialogButtonBox(
             QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
@@ -125,7 +125,7 @@ class SettingsDialog(QDialog):
         self.config = config
         self.config_path = config_path or paths.config_file()
         self.setWindowTitle("DavPunk preferences")
-        self.setMinimumSize(700, 620)
+        self.setMinimumSize(680, 460)
 
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -170,36 +170,35 @@ class SettingsDialog(QDialog):
         self.max_bytes.setValue(self.config.max_resource_bytes)
         self.max_bytes.setSuffix(" bytes")
 
-        form.addRow("Theme", self.theme)
-        form.addRow("", _hint("Which colour scheme to start in."))
-        form.addRow("Default view", self.default_view)
-        form.addRow("", _hint("Which view DavPunk opens on."))
-        form.addRow("", self.show_completed)
+        form.addRow(
+            help_label("Theme", "Which colour scheme DavPunk starts in."),
+            apply_help(self.theme, "Which colour scheme DavPunk starts in."),
+        )
+        form.addRow(
+            help_label("Default view", "Which view DavPunk opens on."),
+            apply_help(self.default_view, "Which view DavPunk opens on."),
+        )
         form.addRow(
             "",
-            _hint(
-                "The in-app toggle is deliberately not remembered — it is a "
-                "way of looking at the list, not a preference."
+            apply_help(
+                self.show_completed,
+                "Only the starting state. The in-app toggle is deliberately not "
+                "remembered — it is a way of looking at the list, not a preference.",
             ),
         )
-        form.addRow("Oversize limit", self.max_bytes)
-        form.addRow(
-            "",
-            _hint(
-                "A task larger than this is shown read-only rather than "
-                "rewritten, so DavPunk cannot mangle something it does not "
-                "fully understand. It can still be deleted or moved."
-            ),
+        oversize = (
+            "A task whose raw iCalendar data is larger than this is shown read-only "
+            "rather than rewritten, so DavPunk cannot mangle something it does not "
+            "fully understand. It can still be deleted or moved."
         )
+        form.addRow(help_label("Oversize limit", oversize), apply_help(self.max_bytes, oversize))
         return page
 
     def _accounts_tab(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
         layout.addWidget(
-            _hint(
-                "Each account is one CalDAV server. DavPunk discovers the task lists on it for you."
-            )
+            hint("Each account is one CalDAV server; DavPunk finds the task lists on it.")
         )
 
         self.remote_list = QListWidget()
@@ -220,12 +219,11 @@ class SettingsDialog(QDialog):
         row.addStretch()
         layout.addLayout(row)
 
-        layout.addWidget(
-            _hint(
-                "Removing an account here only stops DavPunk syncing it. Its "
-                "cached tasks are kept until you purge them explicitly, so a "
-                "mistake is never silently destructive."
-            )
+        apply_help(
+            remove,
+            "Removing an account only stops DavPunk syncing it. Its cached tasks "
+            "are kept until you purge them explicitly, so a mistake here is never "
+            "silently destructive.",
         )
         return page
 
@@ -250,27 +248,21 @@ class SettingsDialog(QDialog):
         ):
             box.setChecked(value)
 
-        form.addRow("", self.mcp_enabled)
-        form.addRow(
-            "",
-            _hint(
-                "Lets an AI assistant work with your tasks through the Model "
-                "Context Protocol. Off by default, and every permission below "
-                "is off by default too."
-            ),
+        mcp_help = (
+            "Lets an AI assistant work with your tasks through the Model Context "
+            "Protocol. Off by default, and every permission below is off by "
+            "default too."
         )
-        form.addRow("Allow", self.cap_read)
-        form.addRow("", self.cap_write)
-        form.addRow("", self.cap_delete)
-        form.addRow("", self.cap_sync)
-        form.addRow(
-            "",
-            _hint(
-                "Grant only what you need. Deletion is separate from writing "
-                "on purpose: an assistant that tidies your task text does not "
-                "need to be able to remove anything."
-            ),
+        form.addRow(help_label("MCP server", mcp_help), apply_help(self.mcp_enabled, mcp_help))
+
+        allow_help = (
+            "Grant only what you need. Deletion is separate from writing on "
+            "purpose: an assistant that tidies your task text does not need to be "
+            "able to remove anything."
         )
+        form.addRow(help_label("Allow", allow_help), apply_help(self.cap_read, allow_help))
+        for box in (self.cap_write, self.cap_delete, self.cap_sync):
+            form.addRow("", apply_help(box, allow_help))
         return page
 
     # -------------------------------------------------------------- remotes
