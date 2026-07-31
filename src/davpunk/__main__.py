@@ -25,6 +25,17 @@ def build_parser() -> argparse.ArgumentParser:
 
     sync = sub.add_parser("sync", help="run one sync cycle and print a summary")
     sync.add_argument("--remote", help="sync only this remote id")
+    sync.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="show what a sync would send and change, writing nothing",
+    )
+    sync.add_argument(
+        "--limit",
+        type=int,
+        default=20,
+        help="how many items to name per section in a --dry-run (default 20)",
+    )
 
     sub.add_parser("status", help="per-remote sync state and pending counts")
     sub.add_parser("conflicts", help="list open conflicts (read-only)")

@@ -27,6 +27,7 @@ pytest.importorskip(
     exc_type=ImportError,
 )
 
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication
 
 from davpunk.config import DavPunkConfig, RemoteConfig
@@ -1275,3 +1276,75 @@ def test_clearing_the_token_key_removes_it_from_the_config(qapp, sse_config):
     assert mcp.token_gpg_key_id is None
     assert not mcp.token_is_encrypted
     assert "token_gpg_key_id" not in sse_config.read_text()
+
+
+# ------------------------------------------------------------- sync preview
+
+
+def _dialog(window, monkeypatch, reports):
+    """A DryRunDialog whose worker is replaced by canned reports."""
+    from davpunk.ui.dry_run_dialog import DryRunDialog
+
+    def fake_dry_run():
+        for remote_id, text, writes, local in reports:
+            window.sync.worker.dryRunFinished.emit(remote_id, text, writes, local)
+        window.sync.worker.dryRunDone.emit()
+
+    monkeypatch.setattr(window.sync, "dry_run", fake_dry_run)
+    return DryRunDialog(window.sync, window)
+
+
+def test_the_preview_shows_each_remotes_report_and_totals_them(window, monkeypatch):
+    dialog = _dialog(
+        window, monkeypatch, [("work", "work: 1 calendar(s)", 3, 5), ("home", "home: idle", 0, 2)]
+    )
+    assert "work: 1 calendar(s)" in dialog.body.toPlainText()
+    assert "home: idle" in dialog.body.toPlainText()
+    assert "3 request(s)" in dialog.headline.text()
+    assert "7 task(s)" in dialog.headline.text()
+
+
+def test_the_preview_says_plainly_when_nothing_would_change(window, monkeypatch):
+    dialog = _dialog(window, monkeypatch, [("work", "work: idle", 0, 0)])
+    assert "would change nothing" in dialog.headline.text()
+
+
+def test_sync_now_is_disabled_until_every_remote_has_reported(window, monkeypatch):
+    """Pressing it against a half-finished picture is exactly the mistake this
+    dialog exists to prevent."""
+    from davpunk.ui.dry_run_dialog import DryRunDialog
+
+    monkeypatch.setattr(window.sync, "dry_run", lambda: None)
+    dialog = DryRunDialog(window.sync, window)
+    assert not dialog.sync_button.isEnabled()
+
+    dialog.add_report("work", "work: 1 calendar(s)", 1, 0)
+    assert not dialog.sync_button.isEnabled()
+
+    dialog.finish()
+    assert dialog.sync_button.isEnabled()
+
+
+def test_closing_the_preview_does_not_start_a_sync(window, monkeypatch):
+    dialog = _dialog(window, monkeypatch, [("work", "work: 1 calendar(s)", 1, 0)])
+    dialog.reject()
+    assert not dialog.proceed
+
+
+def test_the_preview_reports_a_failure_rather_than_pretending(window, monkeypatch):
+    """A plan that raises must reach the user, not vanish into the thread."""
+    from davpunk.core import dry_run
+
+    def boom(*_args, **_kwargs):
+        raise RuntimeError("server on fire")
+
+    monkeypatch.setattr(dry_run, "plan", boom)
+    seen = []
+    # Direct, not queued: the worker's thread affinity would otherwise park the
+    # emission in a queue this thread never drains.
+    window.sync.worker.dryRunFinished.connect(
+        lambda *a: seen.append(a), Qt.ConnectionType.DirectConnection
+    )
+    window.sync.worker.dry_run_all()
+
+    assert seen and "server on fire" in seen[0][1]

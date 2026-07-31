@@ -44,8 +44,12 @@ def _ago(epoch: int | None) -> str:
 
 def cmd_sync(args) -> int:
     """One cycle; a summary on stdout; non-zero on error."""
+    dry = getattr(args, "dry_run", False)
     try:
-        config, conn = _open(args)
+        # A dry run must not open the cache for writing at all — `_open` also
+        # reconciles the remotes, which is a write.  Config is enough.
+        config = load_config(getattr(args, "config", None))
+        conn = None if dry else _open(args)[1]
     except ConfigError as exc:
         print(f"davpunk: {exc}", file=sys.stderr)
         return 2
@@ -55,10 +59,17 @@ def cmd_sync(args) -> int:
         remotes = [r for r in remotes if r.id == args.remote]
         if not remotes:
             print(f"davpunk: no remote named {args.remote!r}", file=sys.stderr)
+            if conn is not None:
+                cache.close_db(conn)
             return 2
     if not remotes:
         print("davpunk: no remotes configured", file=sys.stderr)
+        if conn is not None:
+            cache.close_db(conn)
         return 2
+
+    if dry:
+        return _dry_run(remotes, args)
 
     cancel = threading.Event()
     failed = False
@@ -72,6 +83,30 @@ def cmd_sync(args) -> int:
                 failed = True
     finally:
         cache.close_db(conn)
+    return 1 if failed else 0
+
+
+def _dry_run(remotes, args) -> int:
+    from davpunk import paths
+    from davpunk.core import dry_run
+
+    cancel = threading.Event()
+    failed = False
+    reports = []
+    for remote_config in remotes:
+        report = dry_run.plan(remote_config.to_model(), paths.database_file(), cancel)
+        reports.append(report)
+        print(report.summary(limit=getattr(args, "limit", 20)))
+        if report.result.error and not report.result.skipped:
+            failed = True
+
+    print()
+    print(
+        "Dry run: nothing was written to the server or to your cache. "
+        f"{sum(len(r.writes) for r in reports)} request(s) were withheld."
+    )
+    if any(r.would_write for r in reports):
+        print("Run `davpunk sync` without --dry-run to send them.")
     return 1 if failed else 0
 
 

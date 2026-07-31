@@ -259,3 +259,33 @@ def test_doctor_survives_an_unparseable_config(davpunk_home):
     assert checks["config"].status is Status.FAIL
     # The runtime checks still ran and reported.
     assert checks["python"].status is Status.PASS
+
+
+def test_dry_run_reports_without_touching_anything(cli, capsys, monkeypatch, davpunk_home):
+    """``sync --dry-run`` must not fall through to a real cycle."""
+    from davpunk.core import dry_run, sync_runner
+
+    def refuse(*_args, **_kwargs):
+        raise AssertionError("a dry run must never construct a real SyncRunner cycle")
+
+    monkeypatch.setattr(sync_runner.SyncRunner, "_cycle", refuse)
+    monkeypatch.setattr(
+        dry_run,
+        "plan",
+        lambda remote, _db, _cancel=None, **_kw: dry_run.DryRunReport(
+            remote_id=remote.id,
+            result=sync_runner.SyncResult(remote_id=remote.id, calendars=1),
+            writes=[dry_run.PlannedWrite(verb="CREATE", href="/a.ics", summary="Planned")],
+        ),
+    )
+
+    assert cli("sync", "--dry-run") == 0
+    out = capsys.readouterr().out
+    assert "CREATE Planned" in out
+    assert "nothing was written" in out
+    assert "without --dry-run" in out
+
+
+def test_the_parser_offers_dry_run_and_defaults_to_off():
+    assert build_parser().parse_args(["sync"]).dry_run is False
+    assert build_parser().parse_args(["sync", "--dry-run"]).dry_run is True

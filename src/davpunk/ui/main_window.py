@@ -109,6 +109,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menus["File"] = bar.addMenu("&File")
         self._action(file_menu, "&New task", self.new_task, "new_task")
         self._action(file_menu, "&Sync now", self.sync_now, "sync_now")
+        self._action(file_menu, "&Preview sync (dry run)…", self.preview_sync)
         file_menu.addSeparator()
         self._action(file_menu, "&Quit", self.close, shortcut="Ctrl+Q")
 
@@ -476,6 +477,15 @@ class MainWindow(QMainWindow):
         KeymapOverlay(self.keymap, self).exec()
 
     # ------------------------------------------------------------------ sync
+
+    def preview_sync(self) -> None:
+        """A read-only rehearsal, with the option to go ahead afterwards."""
+        from davpunk.ui.dry_run_dialog import DryRunDialog
+
+        dialog = DryRunDialog(self.sync, self)
+        dialog.exec()
+        if dialog.proceed:
+            self.sync_now()
 
     def sync_now(self) -> None:
         """A user-initiated sync surfaces SyncBusy; the periodic one does not."""

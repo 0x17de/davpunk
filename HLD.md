@@ -1058,6 +1058,38 @@ actually in use are offered, so the picker cannot offer a dead one. The filter
 applies before columns are assigned, and each column header shows the count it
 is currently displaying.
 
+### 14.7 Dry run
+
+`sync --dry-run` and **File → Preview sync…** report what a cycle would do and
+write nothing. The guarantee is enforced at the two boundaries a sync can write
+through, never by a flag threaded through the engine:
+
+- **The server.** `ReadOnlyClient` wraps the real client. Reads pass through
+  untouched, so authentication, discovery and fetch failures are genuine.
+  `put_create`, `put_update` and `delete` record the intended request and
+  return a synthetic 201/204 with an ETag, so the engine follows its normal
+  bookkeeping path rather than an error path a real sync would not take.
+- **The cache.** The cycle runs against a throwaway copy made with `VACUUM
+  INTO` — not a file copy, because the cache is in WAL mode and the committed
+  tail is often still in the sidecar. The real file is never opened for
+  writing; the CLI does not even call `_open`, whose `reconcile_remotes` is
+  itself a write.
+
+Consequently the dry run executes the *same* code path as a real sync —
+`SyncRunner`, the same flock, the same `sync_engine`. A separate planner would
+be a second implementation of the decision rules, free to drift from the one
+that runs.
+
+The local half of the report is a diff of the copy against the original over
+the content columns only; `etag` and `sync_state` move on almost every row of a
+real pull without the task differing, and listing them would bury the changes
+that matter. A collection skipped by the ctag short-circuit is reported as such
+: "nothing to do" and "I did not look" must not render identically, so
+`SyncResult` carries `up_to_date`.
+
+What a dry run cannot know is how the server would answer a write it never
+sent — a 412 collision, a quota rejection, an ETag the server rewrites.
+
 ---
 
 ## 15. MCP exposure

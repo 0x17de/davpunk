@@ -234,6 +234,43 @@ davpunk-sync                 # the background sync daemon
 davpunk-mcp                  # the MCP server (all capabilities off by default)
 ```
 
+### Trying a sync without doing it
+
+```sh
+davpunk sync --dry-run [--remote ID] [--limit N]
+```
+
+It reports every request it *would* send to your server and every row it
+*would* change in your cache, and writes neither. **File → Preview sync…** is
+the same thing in the UI, with a *Sync now* button if you like what you see.
+
+```
+ox: 8 calendar(s)
+  to the server: 2 request(s)
+    CREATE Buy milk           (/dav/ox/einkaufen/a1b2.ics, 412 bytes)
+    UPDATE Fix the gate       (/dav/ox/haus/c3d4.ics, 508 bytes)
+  to the local cache: 12 new, 3 updated, 0 removed, 1 conflict(s)
+    new      Bagger ausleihen
+    upd      Regentonne  [summary, due_value]
+    CONFLICT Kraut und Rüben
+```
+
+The read side is real — discovery, ETags and resource fetches all happen — so a
+wrong password, a vanished collection or an unparseable task shows up in a dry
+run exactly as it would in a real one. What it cannot predict is how the server
+answers a write it never sent: an ETag collision or a quota rejection is only
+knowable by writing.
+
+Two things make the promise structural rather than a matter of remembering to
+check a flag: the CalDAV client is wrapped so `PUT` and `DELETE` cannot reach
+the network, and the cycle runs against a throwaway copy of the database, so
+your real cache is never opened for writing. It is otherwise the *same* code
+path as `davpunk sync` — the same runner, the same engine — rather than a
+second implementation that could drift.
+
+If a collection is skipped because its ctag has not moved, the report says so.
+"Nothing to do" and "I did not look" must not read the same.
+
 ### Background syncing
 
 ```sh

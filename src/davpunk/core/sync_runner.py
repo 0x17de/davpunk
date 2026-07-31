@@ -46,6 +46,10 @@ class SyncResult:
     skipped: bool = False
     error: str | None = None
     calendars: int = 0
+    #: Collections whose ctag had not moved, so they were not enumerated.  A
+    #: report that cannot say this cannot distinguish "I looked and there was
+    #: nothing" from "I did not look".
+    up_to_date: int = 0
     expired: dict[str, int] = field(default_factory=dict)
 
     @property
@@ -62,6 +66,8 @@ class SyncResult:
             f"{self.pulled} pulled",
             f"{self.pushed} pushed",
         ]
+        if self.up_to_date:
+            parts.append(f"{self.up_to_date} already up to date")
         if self.conflicts:
             parts.append(f"{self.conflicts} conflict(s)")
         if self.cancelled:
@@ -149,6 +155,7 @@ class SyncRunner:
                 result.pulled += pull.applied
                 result.conflicts += pull.conflicts
                 result.deleted += pull.deleted
+                result.up_to_date += int(pull.short_circuited)
 
                 if cancel.is_set():
                     result.cancelled = True

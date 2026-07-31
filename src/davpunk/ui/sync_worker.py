@@ -26,6 +26,9 @@ class SyncWorker(QObject):
     progress = Signal(str, str, int, int, str)  # remote, phase, done, total, error
     syncFinished = Signal(str, str)  # remote, summary
     syncFailed = Signal(str, str)  # remote, error
+    #: remote, rendered report, requests withheld, local rows that would change
+    dryRunFinished = Signal(str, str, int, int)
+    dryRunDone = Signal()
 
     def __init__(self, db_path, remotes) -> None:
         super().__init__()
@@ -62,6 +65,33 @@ class SyncWorker(QObject):
         else:
             self.syncFinished.emit(remote.id, result.summary())
 
+    def dry_run_all(self) -> None:
+        """Plan every remote without writing anything.  See :mod:`davpunk.core.dry_run`.
+
+        Deliberately does **not** use ``self._connection()``: the plan runs
+        against its own copy of the database, and handing it the live
+        connection would be the one way to make a dry run write something.
+        """
+        from davpunk.core import dry_run
+
+        self.cancel.clear()
+        try:
+            for remote_config in self._remotes:
+                if self.cancel.is_set():
+                    break
+                remote = remote_config.to_model()
+                try:
+                    report = dry_run.plan(remote, self._db_path, self.cancel)
+                except Exception as exc:  # a failed plan must not kill the thread
+                    log.exception("Dry run failed for %s", remote.id)
+                    self.dryRunFinished.emit(remote.id, f"{remote.id}: FAILED — {exc}", 0, 0)
+                    continue
+                self.dryRunFinished.emit(
+                    remote.id, report.summary(), len(report.writes), report.local.total
+                )
+        finally:
+            self.dryRunDone.emit()
+
     def _emit_progress(self, remote_id, phase, done, total, error) -> None:
         self.progress.emit(remote_id, phase, done, total, error or "")
 
@@ -80,6 +110,7 @@ class SyncController(QObject):
 
     requestSyncAll = Signal()
     requestSyncOne = Signal(object)
+    requestDryRun = Signal()
 
     def __init__(self, db_path, remotes, parent=None) -> None:
         super().__init__(parent)
@@ -90,6 +121,7 @@ class SyncController(QObject):
 
         self.requestSyncAll.connect(self.worker.sync_all)
         self.requestSyncOne.connect(self.worker.sync_one)
+        self.requestDryRun.connect(self.worker.dry_run_all)
         self.thread.finished.connect(self.worker.shutdown)
         self.thread.start()
 
@@ -105,8 +137,19 @@ class SyncController(QObject):
     def syncFailed(self):
         return self.worker.syncFailed
 
+    @property
+    def dryRunFinished(self):
+        return self.worker.dryRunFinished
+
+    @property
+    def dryRunDone(self):
+        return self.worker.dryRunDone
+
     def sync_all(self) -> None:
         self.requestSyncAll.emit()
+
+    def dry_run(self) -> None:
+        self.requestDryRun.emit()
 
     def stop(self) -> None:
         """Cancel, wait briefly, then detach."""
