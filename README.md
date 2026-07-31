@@ -192,6 +192,17 @@ date rather than set, so a heading is not a drop target. Every task editor also
 carries a **Parent** picker, which offers only tasks in the same list and never
 the task's own subtree.
 
+A drag carries the whole selection, so you can pick up a range and move it in
+one go; it keeps the order you picked it up in. Grabbing a row that is *not*
+selected drags only that row. Selecting a parent and one of its children and
+dragging both moves the parent once — the child comes with it rather than
+being torn out of it.
+
+On the board you can also drop straight onto a column's **name**. "Done" is a
+far bigger target than the empty space under the last card, which in a full
+column is not even on screen. A header drop is only ever the column move;
+there is no card under it to nest into.
+
 **n** starts a new task and **Shift+N** a new subtask of the selection; the
 editor's **List** and **Parent** pickers decide where it lands. Right-clicking
 any task offers the same actions.
@@ -213,7 +224,14 @@ dialog does.
 **d d**, *Edit → Delete task*, or the right-click menu. Subtasks are not deleted
 with their parent by default — they become top-level tasks — and the
 confirmation offers **Delete subtasks as well** when there are any. Both trees
-take a multiple selection, so delete and cut act on all of it.
+take a multiple selection, so delete, cut and move act on all of it.
+
+### Moving to another list
+
+**m**, or *Edit → Move to another list…*, on a selection of any size. The
+tasks have to share one list: a move is out of one list and into another, and
+the dialog's job is to offer everywhere except where you already are. A
+selection spanning two lists says so rather than guessing.
 
 Folds stick. A subtree starts closed and stays however you left it, across
 refreshes and restarts of the view; a folded parent shows how many tasks it is

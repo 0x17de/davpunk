@@ -716,6 +716,28 @@ def test_pasting_nothing_plans_nothing():
     assert vm.plan_paste([], task("t"), [task("t")]) == []
 
 
+def test_topmost_drops_what_an_ancestor_already_carries():
+    """Acting on a parent and its child both moves the child twice — once
+    inside the subtree, once on its own, which is what un-nests it."""
+    tasks = [task("p"), task("c", parent_uid="p"), task("g", parent_uid="c"), task("loose")]
+
+    assert [t.uid for t in vm.topmost(tasks, tasks)] == ["p", "loose"]
+
+
+def test_topmost_keeps_unrelated_tasks_and_the_order_given():
+    tasks = [task("a"), task("b"), task("c")]
+    assert [t.uid for t in vm.topmost(tasks, tasks)] == ["a", "b", "c"]
+
+
+def test_topmost_is_scoped_to_one_calendar():
+    parent = task("p")
+    elsewhere = task("c", parent_uid="p")
+    elsewhere.calendar_id = "other-calendar"
+    chosen = [parent, elsewhere]
+
+    assert [t.uid for t in vm.topmost(chosen, chosen)] == ["p", "c"]
+
+
 # ---------------------------------------------------------------- checklists
 
 

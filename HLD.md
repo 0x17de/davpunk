@@ -1060,6 +1060,31 @@ goes through `reparent_fields` as well, not straight to the column. Its
 is a PUT to the new collection and a DELETE from the old one, which is
 `move_task_local` and its subtree question, not a column write.
 
+**What a drag carries.** The whole selection, sorted by `sort_key`, so a drag
+is as fast as the multi-select delete, cut and move beside it. Grabbing a row
+*outside* the selection carries only that row: Qt normally reselects on press,
+but a drag that silently took rows the user did not grab would be the worst
+possible surprise. `topmost` then drops anything an ancestor in the same drag
+already carries — moving it a second time is exactly what un-nests it — and the
+same helper scopes a multi-task move, for the same reason.
+
+Several dragged tasks land in the order they were picked up in, each just below
+the one before it. A task already exactly where it is being dropped writes
+nothing but **still becomes the anchor** for the next one; only the refusals
+that mean "not here, ever" (another calendar, or an anchor inside the task's own
+subtree) skip it entirely. Advancing the anchor on a no-op is what keeps a
+block in order — without it the second task lands above the first.
+
+**Kanban drops.** Onto a card, `plan_paste` decides the nesting for the whole
+dragged set at once, so the descendant-dedup and the cycle refusal are the code
+cut-and-paste uses; a plan that `needs_move` is refused rather than performed,
+because nesting across calendars is a `RELATED-TO` that never resolves. Onto a
+column, or onto its **header**, it is only the column move. The header is a
+drop target in its own right — aiming at the word "Done" is a much bigger
+target than the empty space under the last card, which in a full column is not
+on screen at all — and it accepts the drag enter *and* every drag move, or Qt
+never delivers the drop.
+
 **List-view drops.** `plan_list_drop` decides them, Qt-free: a drop **onto** a
 row delegates to `reparent_fields`; a drop **above** or **below** one takes
 that row's parent and goes through `reorder_siblings`, so the partial rebalance

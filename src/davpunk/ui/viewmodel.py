@@ -667,6 +667,26 @@ class PastePlan:
         return {"parent_uid": self.parent_uid, "davpunk_order": self.davpunk_order}
 
 
+def topmost(chosen: list[Task], tasks: list[Task]) -> list[Task]:
+    """``chosen`` with anything an ancestor in the same set already carries.
+
+    Selecting a parent and one of its children and then acting on both moves
+    the child twice — once inside its parent's subtree, once on its own, which
+    is what un-nests it.  Dropping it here is what makes "select a range and
+    drag it" behave the way it looks.
+    """
+    return [
+        entry
+        for entry in chosen
+        if not any(
+            other.uid != entry.uid
+            and other.calendar_id == entry.calendar_id
+            and entry.uid in descendants(other, tasks)
+            for other in chosen
+        )
+    ]
+
+
 def plan_paste(cut: list[Task], target: Task | None, tasks: list[Task]) -> list[PastePlan]:
     """Where each cut task lands when pasted onto ``target``.
 
@@ -690,17 +710,7 @@ def plan_paste(cut: list[Task], target: Task | None, tasks: list[Task]) -> list[
             if target.calendar_id == entry.calendar_id and target.uid in descendants(entry, tasks):
                 return []
 
-    tops = [
-        entry
-        for entry in cut
-        if not any(
-            other.uid != entry.uid
-            and other.calendar_id == entry.calendar_id
-            and entry.uid in descendants(other, tasks)
-            for other in cut
-        )
-    ]
-
+    tops = topmost(cut, tasks)
     cut_keys = {(t.calendar_id, t.uid) for t in cut}
     new_parent = target.uid if target is not None else None
 

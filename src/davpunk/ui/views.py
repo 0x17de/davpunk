@@ -78,6 +78,28 @@ def _tasks_of(items) -> list[Task]:
     return [task for task in found if task is not None]
 
 
+def dragged_tasks(source) -> list[Task]:
+    """What a drag out of ``source`` is carrying.
+
+    The whole selection, so a drag is as fast as the multi-select delete and
+    cut beside it.  Grabbing a row *outside* the selection carries only that
+    row — Qt normally reselects on press, but a drag that silently took rows
+    the user did not grab would be the worst possible surprise.
+    """
+    if not isinstance(source, QTreeWidget):
+        return []
+    grabbed = source.currentItem()
+    task = grabbed.data(0, TASK_ROLE) if grabbed is not None else None
+    if task is None:
+        return []
+
+    selected = _tasks_of(source.selectedItems())
+    key = (task.calendar_id, task.uid)
+    if key not in {(t.calendar_id, t.uid) for t in selected}:
+        return [task]
+    return sorted(selected, key=vm.sort_key)
+
+
 def _walk(tree: QTreeWidget):
     stack = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
     while stack:
@@ -275,39 +297,64 @@ class ListView(QWidget):
         self.refresh()
         return self._coalesce(result.touched, result.rebalanced)
 
-    def _on_drop(self, task: Task, onto: Task | None, position) -> None:
+    def _on_drop(self, dragged: list[Task], onto: Task | None, position) -> None:
         """A list drop reparents and reorders.  It never touches STATUS.
 
         The buckets are a computed view of DUE, not a settable field, so a
         heading is not a drop target — it reaches here as ``onto is None``,
         which is also what empty space looks like.
+
+        Several dragged tasks land in the order they were in, each just below
+        the one before it, because that is what dropping a block of rows at a
+        point looks like.  Anything an ancestor in the same drag already
+        carries is dropped first: moving it again is what would un-nest it.
         """
-        if onto is None or task.is_read_only:
+        if onto is None:
             return
 
         tasks = vm.load_tasks(self.conn)
-        plan = vm.plan_list_drop(task, onto, position, tasks)
-        if plan is None:
-            return
+        movable = vm.topmost([t for t in dragged if not t.is_read_only], tasks)
 
-        siblings = [t for t in tasks if t.calendar_id == task.calendar_id]
-        moved = next((t for t in siblings if t.uid == task.uid), None)
-        if moved is None:
-            return
+        anchor, where, touched, rebalanced = onto, position, 0, False
+        for task in movable:
+            # The refusals that mean "not here, ever": another calendar, or a
+            # drop that would put the anchor inside the task's own subtree.
+            # Everything else — including a task already exactly where it is
+            # being dropped — still becomes the anchor for the next one.
+            if task.calendar_id != anchor.calendar_id:
+                continue
+            if anchor.uid != task.uid and anchor.uid in vm.descendants(task, tasks):
+                continue
 
-        # The parent and the order in one call, so an interrupted drop cannot
-        # leave a task nested where its order says it does not belong.
-        cache.update_task_optimistic(
-            moved.id,
-            {"parent_uid": plan.parent_uid, "davpunk_order": plan.orders[task.uid]},
-            self.conn,
-        )
-        self._write_orders(
-            {uid: order for uid, order in plan.orders.items() if uid != task.uid}, siblings
-        )
+            plan = vm.plan_list_drop(task, anchor, where, tasks)
+            siblings = [t for t in tasks if t.calendar_id == task.calendar_id]
+            moved = next((t for t in siblings if t.uid == task.uid), None)
+            if plan is not None and moved is not None:
+                # The parent and the order in one call, so an interrupted drop
+                # cannot leave a task nested where its order says it does not
+                # belong.
+                cache.update_task_optimistic(
+                    moved.id,
+                    {"parent_uid": plan.parent_uid, "davpunk_order": plan.orders[task.uid]},
+                    self.conn,
+                )
+                self._write_orders(
+                    {uid: order for uid, order in plan.orders.items() if uid != task.uid}, siblings
+                )
+                touched += plan.touched
+                rebalanced = rebalanced or plan.rebalanced
+                tasks = vm.load_tasks(self.conn)
+
+            # Moved or already there, the next one goes below it — that is what
+            # keeps a dragged block in the order it was picked up in.
+            anchor = next(
+                (t for t in tasks if t.uid == task.uid and t.calendar_id == task.calendar_id),
+                anchor,
+            )
+            where = vm.DropPosition.BELOW
 
         self.refresh()
-        message = self._coalesce(plan.touched, plan.rebalanced)
+        message = self._coalesce(touched, rebalanced)
         if message:
             self.toast.emit(message)
 
@@ -339,12 +386,10 @@ class _DropTree(QTreeWidget):
     rows would show a state the next refresh contradicts.  The event is
     consumed, the model is told, and the redraw comes from the data.
 
-    The drag itself is single-task even though the selection is not:
-    ``currentItem()`` is the row the mouse picked up, and dragging a whole
-    selection is a separate gesture from cutting one.
+    A drag carries the whole selection — see :func:`dragged_tasks`.
     """
 
-    #: ``(dragged task, task dropped onto or None, DropPosition)``
+    #: ``(dragged tasks, task dropped onto or None, DropPosition)``
     dropped = Signal(object, object, object)
 
     def __init__(self, parent=None) -> None:
@@ -354,10 +399,8 @@ class _DropTree(QTreeWidget):
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
 
     def dropEvent(self, event) -> None:
-        source = event.source()
-        dragged = source.currentItem() if isinstance(source, QTreeWidget) else None
-        task = dragged.data(0, TASK_ROLE) if dragged is not None else None
-        if task is None:
+        tasks = dragged_tasks(event.source())
+        if not tasks:
             event.ignore()
             return
 
@@ -368,7 +411,7 @@ class _DropTree(QTreeWidget):
         onto = target.data(0, TASK_ROLE) if target is not None else None
 
         event.acceptProposedAction()
-        self.dropped.emit(task, onto, position)
+        self.dropped.emit(tasks, onto, position)
 
 
 class _ColumnTree(_DropTree):
@@ -377,6 +420,42 @@ class _ColumnTree(_DropTree):
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setHeaderHidden(True)
+
+
+class _ColumnHeader(QLabel):
+    """The column's name, and a drop target in its own right.
+
+    Aiming at the word "Done" is a much bigger target than the empty space
+    under the last card — which in a full column is not on screen at all.  A
+    header drop is only ever the column move: there is no card under it to
+    nest into.
+    """
+
+    #: ``(dragged tasks,)`` — the column is implied by which header it is.
+    dropped = Signal(object)
+
+    def __init__(self, text: str, parent=None) -> None:
+        super().__init__(text, parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, event) -> None:
+        # Without accepting the enter and every move, Qt never delivers the
+        # drop at all — the cursor just shows "no".
+        if dragged_tasks(event.source()):
+            event.acceptProposedAction()
+        else:
+            event.ignore()
+
+    def dragMoveEvent(self, event) -> None:
+        self.dragEnterEvent(event)
+
+    def dropEvent(self, event) -> None:
+        tasks = dragged_tasks(event.source())
+        if not tasks:
+            event.ignore()
+            return
+        event.acceptProposedAction()
+        self.dropped.emit(tasks)
 
 
 class KanbanView(QWidget):
@@ -406,7 +485,12 @@ class KanbanView(QWidget):
         self.headers: dict[str, QLabel] = {}
         for column in self.columns:
             box = QVBoxLayout()
-            header = QLabel(f"<b>{column.label}</b>")
+            header = _ColumnHeader(f"<b>{column.label}</b>")
+            # Dropping on the name is the same as dropping in the column, and
+            # a much easier thing to aim at.
+            header.dropped.connect(
+                lambda tasks, column_id=column.id: self._on_drop(column_id, tasks, None)
+            )
             self.headers[column.id] = header
             box.addWidget(header)
             widget = _ColumnTree()
@@ -416,8 +500,8 @@ class KanbanView(QWidget):
             # Only a drop *onto* a card nests; between two cards the board has
             # no ordering question to answer, so it is just a column move.
             widget.dropped.connect(
-                lambda task, onto, position, column_id=column.id: self._on_drop(
-                    column_id, task, onto if position is vm.DropPosition.ON else None
+                lambda tasks, onto, position, column_id=column.id: self._on_drop(
+                    column_id, tasks, onto if position is vm.DropPosition.ON else None
                 )
             )
             box.addWidget(widget)
@@ -478,29 +562,40 @@ class KanbanView(QWidget):
                     return True
         return False
 
-    def _on_drop(self, column_id: str, task: Task, onto: Task | None) -> None:
-        """Onto a card: become its subtask, in its column.  Onto the column: just move.
+    def _on_drop(self, column_id: str, dragged: list[Task], onto: Task | None) -> None:
+        """Onto a card: become its subtasks, in its column.  Onto the column or
+        its header: just the move.
 
-        Both in a single update, so an interrupted drag cannot leave a task
-        nested somewhere it is not shown.
+        One update per task carrying both fields, so an interrupted drag
+        cannot leave one nested somewhere it is not shown.
         """
         column = next((c for c in self.columns if c.id == column_id), None)
-        if column is None or task.is_read_only:
+        if column is None:
             return
-        fields = dict(vm.drop_fields(column))
+        movable = [task for task in dragged if not task.is_read_only]
+        if not movable:
+            return
 
+        nesting: dict[str, dict[str, object]] = {}
         if onto is not None:
-            if onto.calendar_id != task.calendar_id:
-                # RELATED-TO resolves within one calendar only, so this would
-                # be a link that never renders.
-                log.info("Refusing to nest %s under a task in another calendar", task.uid[:8])
+            for plan in vm.plan_paste(movable, onto, vm.load_tasks(self.conn)):
+                if plan.needs_move:
+                    # RELATED-TO resolves within one calendar only, so this
+                    # would be a link that never renders.
+                    log.info(
+                        "Refusing to nest %s under a task in another calendar",
+                        plan.task.uid[:8],
+                    )
+                    continue
+                nesting[plan.task.uid] = plan.fields
+            if not nesting:
                 return
-            reparent = vm.reparent_fields(task, onto.uid, vm.load_tasks(self.conn))
-            if reparent is None:
-                return
-            fields.update(reparent)
+            movable = [task for task in movable if task.uid in nesting]
 
-        cache.update_task_optimistic(task.id, fields, self.conn)
+        for task in movable:
+            fields = dict(vm.drop_fields(column))
+            fields.update(nesting.get(task.uid, {}))
+            cache.update_task_optimistic(task.id, fields, self.conn)
         self.refresh()
 
     def _calendar_names(self) -> dict[str, str]:

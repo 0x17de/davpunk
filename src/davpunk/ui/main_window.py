@@ -643,24 +643,50 @@ class MainWindow(QMainWindow):
             cache.update_task_optimistic(plan.task.id, plan.fields, self.conn)
 
     def move_task(self) -> None:
-        task = self.selected_task()
-        if task is None:
+        tasks = self.selected_tasks()
+        if not tasks:
             return
 
-        has_children = bool(cache.children_of(task.id, self.conn))
-        dialog = MoveDialog(cache.calendar_rows(self.conn), task.calendar_id, has_children, self)
+        sources = {task.calendar_id for task in tasks}
+        if len(sources) > 1:
+            # A move is out of one list and into another, and the dialog's
+            # whole job is to exclude the list you are leaving.
+            QMessageBox.information(
+                self,
+                "One list at a time",
+                "These tasks are in different lists. Select tasks from a single "
+                "list, and DavPunk will offer everywhere else as the destination.",
+            )
+            return
+
+        has_children = any(cache.children_of(task.id, self.conn) for task in tasks)
+        dialog = MoveDialog(
+            cache.calendar_rows(self.conn),
+            tasks[0].calendar_id,
+            has_children,
+            self,
+            heading=f"Move {_name_list(tasks)} to:" if len(tasks) > 1 else None,
+        )
         if dialog.exec() != MoveDialog.DialogCode.Accepted:
             return
         target = dialog.target_calendar_id()
         if not target:
             return
 
-        self._guarded(
-            lambda: cache.move_task_local(
-                task.id, target, self.conn, move_subtree=dialog.wants_subtree()
-            )
-        )
+        subtree = dialog.wants_subtree()
+        self._guarded(lambda: self._move_all(tasks, target, subtree=subtree))
         self.refresh()
+
+    def _move_all(self, tasks: list[Task], target: str, *, subtree: bool) -> None:
+        """One move per task, skipping any an ancestor already carries.
+
+        Moving a task that its own parent's subtree move has already relocated
+        would be a second, pointless retarget — and with the subtree declined
+        it is exactly the task that was just promoted to root.
+        """
+        chosen = vm.topmost(tasks, vm.load_tasks(self.conn)) if subtree else tasks
+        for task in chosen:
+            cache.move_task_local(task.id, target, self.conn, move_subtree=subtree)
 
     def reorder_selected(self, delta: int) -> None:
         task = self.selected_task()

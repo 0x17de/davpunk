@@ -308,7 +308,7 @@ def test_dropping_a_card_onto_another_nests_it_and_moves_it_there(window, make_t
     parent = _find(kanban.lists["todo"], "p")
     child = _find(kanban.lists["todo"], "c").data(0, _TASK_ROLE())
 
-    kanban._on_drop("inprogress", child, parent.data(0, _TASK_ROLE()))
+    kanban._on_drop("inprogress", [child], parent.data(0, _TASK_ROLE()))
 
     moved = _reload(window, child)
     assert moved.parent_uid == "p"
@@ -320,7 +320,7 @@ def test_dropping_a_card_on_empty_space_only_moves_it(window, make_task):
     kanban = _kanban(window)
     card = _find(kanban.lists["todo"], "c").data(0, _TASK_ROLE())
 
-    kanban._on_drop("done", card, None)
+    kanban._on_drop("done", [card], None)
 
     moved = _reload(window, card)
     assert moved.parent_uid is None
@@ -337,7 +337,7 @@ def test_a_card_cannot_be_nested_under_one_in_another_calendar(
     parent = _find(kanban.lists["todo"], "p").data(0, _TASK_ROLE())
     child = _find(kanban.lists["todo"], "c").data(0, _TASK_ROLE())
 
-    kanban._on_drop("todo", child, parent)
+    kanban._on_drop("todo", [child], parent)
 
     assert _reload(window, child).parent_uid is None
 
@@ -558,7 +558,7 @@ def test_dropping_a_row_onto_another_nests_it(window, make_task):
     cache.create_task_local(make_task("b", davpunk_order=2000), window.conn)
     tree = _list(window)
 
-    window.list_view._on_drop(_task(tree, "b"), _task(tree, "a"), _ON)
+    window.list_view._on_drop([_task(tree, "b")], _task(tree, "a"), _ON)
 
     assert _find(tree, "b").parent() is _find(tree, "a")
 
@@ -568,7 +568,7 @@ def test_dropping_a_row_between_two_others_reorders_it(window, make_task):
         cache.create_task_local(make_task(uid, davpunk_order=order), window.conn)
     tree = _list(window)
 
-    window.list_view._on_drop(_task(tree, "c"), _task(tree, "a"), _BELOW)
+    window.list_view._on_drop([_task(tree, "c")], _task(tree, "a"), _BELOW)
 
     orders = _orders(window)
     assert orders["a"] < orders["c"] < orders["b"]
@@ -582,7 +582,7 @@ def test_dropping_beside_a_row_in_another_group_reparents_and_reorders(window, m
     cache.create_task_local(make_task("loose", davpunk_order=2000), window.conn)
     tree = _list(window)
 
-    window.list_view._on_drop(_task(tree, "loose"), _task(tree, "kid"), _BELOW)
+    window.list_view._on_drop([_task(tree, "loose")], _task(tree, "kid"), _BELOW)
 
     moved = _reload(window, _task(tree, "loose"))
     assert moved.parent_uid == "p"
@@ -596,7 +596,7 @@ def test_dropping_on_a_bucket_heading_does_nothing(window, make_task):
     tree = _list(window)
     before = _orders(window)
 
-    window.list_view._on_drop(_task(tree, "a"), None, _ON)
+    window.list_view._on_drop([_task(tree, "a")], None, _ON)
 
     assert _orders(window) == before
     assert _reload(window, _task(tree, "a")).parent_uid is None
@@ -609,7 +609,7 @@ def test_dropping_a_read_only_row_is_refused(window, make_task):
     )
     tree = _list(window)
 
-    window.list_view._on_drop(_task(tree, "b"), _task(tree, "a"), _ON)
+    window.list_view._on_drop([_task(tree, "b")], _task(tree, "a"), _ON)
 
     assert _reload(window, _task(tree, "b")).parent_uid is None
 
@@ -620,7 +620,7 @@ def test_a_row_cannot_be_dropped_onto_one_in_another_calendar(window, make_task,
     cache.create_task_local(make_task("here"), window.conn)
     tree = _list(window)
 
-    window.list_view._on_drop(_task(tree, "here"), _task(tree, "there"), _ON)
+    window.list_view._on_drop([_task(tree, "here")], _task(tree, "there"), _ON)
 
     assert _reload(window, _task(tree, "here")).parent_uid is None
 
@@ -632,7 +632,7 @@ def test_a_rebalancing_drop_reports_it_once(window, make_task):
 
     said = []
     window.list_view.toast.connect(said.append)
-    window.list_view._on_drop(_task(tree, "c"), _task(tree, "b"), _ABOVE)
+    window.list_view._on_drop([_task(tree, "c")], _task(tree, "b"), _ABOVE)
 
     assert said and "reordering" in said[0]
 
@@ -693,11 +693,13 @@ def test_a_drop_event_maps_qts_indicator_to_a_drop_position(
     monkeypatch.setattr(type(tree), "itemAt", lambda self, point: _find(self, "a"))
 
     seen = []
-    tree.dropped.connect(lambda task, onto, position: seen.append((task.uid, onto.uid, position)))
+    tree.dropped.connect(
+        lambda tasks, onto, position: seen.append(([t.uid for t in tasks], onto.uid, position))
+    )
     event = _FakeDrop(tree, QPointF(0, 0))
     tree.dropEvent(event)
 
-    assert seen == [("b", "a", expected)]
+    assert seen == [(["b"], "a", expected)]
     assert event.accepted
 
 
@@ -730,6 +732,177 @@ def _orders(window):
         row["uid"]: row["davpunk_order"]
         for row in window.conn.execute("SELECT uid, davpunk_order FROM tasks")
     }
+
+
+def test_a_drag_carries_the_whole_selection(window, make_task):
+    """As fast as the multi-select delete and cut beside it."""
+    from davpunk.ui.views import dragged_tasks
+
+    for uid, order in (("a", 1000), ("b", 2000), ("c", 3000)):
+        cache.create_task_local(make_task(uid, davpunk_order=order), window.conn)
+    tree = _list(window)
+    _select(tree, "a", "c")
+
+    assert [t.uid for t in dragged_tasks(tree)] == ["a", "c"]
+
+
+def test_grabbing_a_row_outside_the_selection_drags_only_it(window, make_task):
+    """A drag that silently took rows the user did not grab would be the worst
+    possible surprise."""
+    from davpunk.ui.views import dragged_tasks
+
+    for uid, order in (("a", 1000), ("b", 2000), ("c", 3000)):
+        cache.create_task_local(make_task(uid, davpunk_order=order), window.conn)
+    tree = _list(window)
+    _select(tree, "a", "b")
+    tree.setCurrentItem(_find(tree, "c"))
+    _find(tree, "c").setSelected(False)
+
+    assert [t.uid for t in dragged_tasks(tree)] == ["c"]
+
+
+def test_a_drag_from_something_that_is_not_a_tree_carries_nothing(window):
+    from davpunk.ui.views import dragged_tasks
+
+    assert dragged_tasks(None) == []
+    assert dragged_tasks(window.statusBar()) == []
+
+
+def test_dropping_several_rows_onto_one_nests_all_of_them(window, make_task):
+    cache.create_task_local(make_task("p", davpunk_order=1000), window.conn)
+    cache.create_task_local(make_task("a", davpunk_order=2000), window.conn)
+    cache.create_task_local(make_task("b", davpunk_order=3000), window.conn)
+    tree = _list(window)
+
+    window.list_view._on_drop([_task(tree, "a"), _task(tree, "b")], _task(tree, "p"), _ON)
+
+    parents = _parents(window)
+    assert parents["a"] == parents["b"] == "p"
+
+
+def test_dropping_several_rows_between_two_keeps_their_order(window, make_task):
+    for uid, order in (("x", 1000), ("y", 9000), ("a", 2000), ("b", 3000)):
+        cache.create_task_local(make_task(uid, davpunk_order=order), window.conn)
+    tree = _list(window)
+
+    window.list_view._on_drop([_task(tree, "a"), _task(tree, "b")], _task(tree, "x"), _BELOW)
+
+    orders = _orders(window)
+    assert orders["x"] < orders["a"] < orders["b"] < orders["y"]
+
+
+def test_dragging_a_parent_and_its_child_together_does_not_unnest_the_child(window, make_task):
+    """The parent's move already carries it; moving it again is what would
+    tear it out."""
+    cache.create_task_local(make_task("t", davpunk_order=1000), window.conn)
+    cache.create_task_local(make_task("p", davpunk_order=2000), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p", davpunk_order=500), window.conn)
+    tree = _list(window)
+
+    window.list_view._on_drop([_task(tree, "p"), _task(tree, "c")], _task(tree, "t"), _ON)
+
+    parents = _parents(window)
+    assert parents["p"] == "t"
+    assert parents["c"] == "p"
+
+
+def _parents(window):
+    return {
+        row["uid"]: row["parent_uid"]
+        for row in window.conn.execute("SELECT uid, parent_uid FROM tasks")
+    }
+
+
+# ---------------------------------------------------------- column headers
+
+
+def test_a_column_header_is_a_drop_target(window):
+    """Aiming at the word "Done" beats aiming at the empty space under the
+    last card — which in a full column is not on screen at all."""
+    assert all(header.acceptDrops() for header in window.kanban_view.headers.values())
+
+
+def test_dropping_on_a_column_name_moves_the_card_there(window, make_task):
+    cache.create_task_local(make_task("c"), window.conn)
+    kanban = _kanban(window)
+    card = _task(kanban.lists["todo"], "c")
+    kanban.lists["todo"].setCurrentItem(_find(kanban.lists["todo"], "c"))
+
+    kanban.headers["done"].dropped.emit([card])
+
+    moved = _reload(window, card)
+    assert moved.status is Status.COMPLETED
+    assert moved.kanban_col == "done"
+    assert moved.parent_uid is None  # a header has no card to nest into
+
+
+def test_dropping_several_cards_on_a_column_name_moves_all_of_them(window, make_task):
+    for uid in ("a", "b"):
+        cache.create_task_local(make_task(uid), window.conn)
+    kanban = _kanban(window)
+    cards = [_task(kanban.lists["todo"], uid) for uid in ("a", "b")]
+
+    kanban.headers["inprogress"].dropped.emit(cards)
+
+    statuses = {
+        row["uid"]: row["status"] for row in window.conn.execute("SELECT uid, status FROM tasks")
+    }
+    assert statuses == {"a": Status.IN_PROCESS.value, "b": Status.IN_PROCESS.value}
+
+
+def test_a_header_accepts_a_drag_from_a_tree_and_nothing_else(window, make_task):
+    cache.create_task_local(make_task("c"), window.conn)
+    kanban = _kanban(window)
+    tree = kanban.lists["todo"]
+    tree.setCurrentItem(_find(tree, "c"))
+    header = kanban.headers["done"]
+
+    from_tree = _FakeDrop(tree, None)
+    header.dragEnterEvent(from_tree)
+    assert from_tree.accepted
+
+    from_nowhere = _FakeDrop(None, None)
+    header.dragEnterEvent(from_nowhere)
+    assert from_nowhere.ignored
+
+
+def test_a_header_drop_with_nothing_dragged_is_ignored(window):
+    event = _FakeDrop(None, None)
+    window.kanban_view.headers["done"].dropEvent(event)
+
+    assert event.ignored
+    assert not event.accepted
+
+
+def test_dropping_several_cards_onto_one_nests_all_of_them(window, make_task):
+    for uid in ("p", "a", "b"):
+        cache.create_task_local(make_task(uid), window.conn)
+    kanban = _kanban(window)
+    parent = _task(kanban.lists["todo"], "p")
+    cards = [_task(kanban.lists["todo"], uid) for uid in ("a", "b")]
+
+    kanban._on_drop("inprogress", cards, parent)
+
+    parents = _parents(window)
+    assert parents["a"] == parents["b"] == "p"
+    assert _reload(window, cards[0]).status is Status.IN_PROCESS
+
+
+def test_a_read_only_card_is_left_where_it_is(window, make_task):
+    cache.create_task_local(make_task("ok"), window.conn)
+    cache.create_task_local(
+        make_task("locked", read_only_reason=ReadOnlyReason.OVERSIZE), window.conn
+    )
+    kanban = _kanban(window)
+    cards = [_task(kanban.lists["todo"], uid) for uid in ("ok", "locked")]
+
+    kanban._on_drop("done", cards, None)
+
+    statuses = {
+        row["uid"]: row["status"] for row in window.conn.execute("SELECT uid, status FROM tasks")
+    }
+    assert statuses["ok"] == Status.COMPLETED.value
+    assert statuses["locked"] == Status.NEEDS_ACTION.value
 
 
 # ------------------------------------------------------------------ new task
@@ -1201,6 +1374,129 @@ def test_pasting_an_empty_clipboard_says_so(window, make_task):
     window.paste_task()
 
     assert "Nothing has been cut" in window.statusBar().currentMessage()
+
+
+# ---------------------------------------------------------------- move to list
+
+
+def _accept_move(monkeypatch, subtree=None):
+    def _exec(dialog):
+        if subtree is not None:
+            dialog.move_subtree.setChecked(subtree)
+        return MoveDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(MoveDialog, "exec", _exec)
+
+
+def test_moving_a_multiple_selection_takes_all_of_them(
+    window, make_task, other_calendar_id, monkeypatch
+):
+    for uid in ("a", "b", "c"):
+        cache.create_task_local(make_task(uid), window.conn)
+    tree = _list(window)
+    _select(tree, "a", "c")
+
+    _accept_move(monkeypatch)
+    window.move_task()
+
+    where = {
+        row["uid"]: row["calendar_id"]
+        for row in window.conn.execute("SELECT uid, calendar_id FROM tasks")
+    }
+    assert where["a"] == where["c"] == other_calendar_id
+    assert where["b"] != other_calendar_id
+
+
+def test_a_selection_spanning_lists_is_refused(
+    window, make_task, other_calendar_id, calendar_id, monkeypatch
+):
+    """A move is out of one list and into another, and the dialog's whole job
+    is to exclude the list you are leaving."""
+    cache.create_task_local(make_task("here"), window.conn)
+    cache.create_task_local(make_task("there", calendar_id=other_calendar_id), window.conn)
+    tree = _list(window)
+    _select(tree, "here", "there")
+
+    told = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a: told.append(a))
+    monkeypatch.setattr(MoveDialog, "exec", lambda self: pytest.fail("must not be asked"))
+    window.move_task()
+
+    assert told and "different lists" in told[0][2]
+    assert (
+        cache.get_task_row(
+            window.conn.execute("SELECT id FROM tasks WHERE uid = 'here'").fetchone()[0],
+            window.conn,
+        )["calendar_id"]
+        == calendar_id
+    )
+
+
+def test_a_parent_and_its_child_are_moved_once_not_twice(
+    window, synced_task, other_calendar_id, monkeypatch
+):
+    """The parent's subtree move already carries the child; retargeting it
+    again would be a second, pointless move."""
+    synced_task("p")
+    synced_task("c", parent_uid="p")
+    tree = _list(window)
+    _select(tree, "p", "c")
+
+    _accept_move(monkeypatch, subtree=True)
+    window.move_task()
+
+    rows = {
+        row["uid"]: (row["calendar_id"], row["parent_uid"])
+        for row in window.conn.execute("SELECT uid, calendar_id, parent_uid FROM tasks")
+    }
+    assert rows["p"] == (other_calendar_id, None)
+    assert rows["c"] == (other_calendar_id, "p")  # still nested, moved with it
+    assert window.conn.execute("SELECT COUNT(*) FROM tombstones").fetchone()[0] == 2
+
+
+def test_declining_the_subtree_still_moves_both_selected(
+    window, synced_task, other_calendar_id, monkeypatch
+):
+    synced_task("p")
+    synced_task("c", parent_uid="p")
+    tree = _list(window)
+    _select(tree, "p", "c")
+
+    _accept_move(monkeypatch, subtree=False)
+    window.move_task()
+
+    rows = {
+        row["uid"]: (row["calendar_id"], row["parent_uid"])
+        for row in window.conn.execute("SELECT uid, calendar_id, parent_uid FROM tasks")
+    }
+    assert rows["p"][0] == other_calendar_id
+    assert rows["c"][0] == other_calendar_id
+    assert rows["c"][1] is None  # promoted to root when it was left behind
+
+
+def test_the_move_dialog_names_what_it_is_about_to_move(
+    window, make_task, monkeypatch, other_calendar_id
+):
+    for uid in ("a", "b"):
+        cache.create_task_local(make_task(uid, summary=uid.upper()), window.conn)
+    tree = _list(window)
+    _select(tree, "a", "b")
+
+    seen = []
+
+    def _exec(dialog):
+        seen.append(dialog.findChild(type(dialog.children()[1])).text())
+        return MoveDialog.DialogCode.Rejected
+
+    monkeypatch.setattr(MoveDialog, "exec", _exec)
+    window.move_task()
+
+    assert seen and "“A” and “B”" in seen[0]
+
+
+def test_moving_with_nothing_selected_asks_nothing(window, monkeypatch):
+    monkeypatch.setattr(MoveDialog, "exec", lambda self: pytest.fail("nothing was selected"))
+    window.move_task()
 
 
 # ------------------------------------------------------------- context menu
