@@ -278,16 +278,25 @@ class TreeNode:
     linked_parent_elsewhere: bool = False
 
 
-def build_tree(tasks: list[Task]) -> list[TreeNode]:
+def build_tree(tasks: list[Task], universe: list[Task] | None = None) -> list[TreeNode]:
     """Roots first, children nested, with a visited set and a depth cap.
 
     Parent resolution is **within one calendar only** — ``uid`` is deliberately
     non-unique across calendars — so a task whose parent is not in this list
     renders at root rather than disappearing.
+
+    ``universe`` is every task that exists, for when ``tasks`` is a slice of a
+    view rather than all of it — one bucket, one kanban column, one filter.
+    Without it a child whose parent merely landed in a *different* slice looks
+    exactly like one whose parent is in another calendar, and wrongly gets the
+    "linked parent elsewhere" marker.  With it, that marker means what it says.
     """
     by_uid: dict[tuple[str | None, str], Task] = {
         (task.calendar_id, task.uid): task for task in tasks
     }
+    known = (
+        {(task.calendar_id, task.uid) for task in universe} if universe is not None else set(by_uid)
+    )
     children: dict[tuple[str | None, str], list[Task]] = {}
     roots: list[Task] = []
     orphans: set[str] = set()
@@ -297,7 +306,7 @@ def build_tree(tasks: list[Task]) -> list[TreeNode]:
         if key is not None and key in by_uid:
             children.setdefault(key, []).append(task)
         else:
-            if task.parent_uid:
+            if task.parent_uid and (task.calendar_id, task.parent_uid) not in known:
                 orphans.add(task.uid)
             roots.append(task)
 
@@ -315,6 +324,44 @@ def build_tree(tasks: list[Task]) -> list[TreeNode]:
         return node
 
     return [walk(task, 0, {task.uid}) for task in sorted(roots, key=sort_key)]
+
+
+def subtree_size(node: TreeNode) -> int:
+    """How many tasks a folded node is hiding."""
+    return sum(1 + subtree_size(child) for child in node.children)
+
+
+@dataclass
+class FoldState:
+    """Which subtrees are open, remembered across refreshes.
+
+    A refresh rebuilds every row, so without this the tree silently re-opens
+    itself every few seconds and folding is useless.  Two sets rather than one:
+    "never seen" has to be distinguishable from "the user closed it", so that a
+    node appearing later can take the caller's default instead of inheriting
+    whatever the last node with that key happened to do.
+    """
+
+    open_keys: set = field(default_factory=set)
+    closed_keys: set = field(default_factory=set)
+
+    def is_open(self, key, *, default: bool) -> bool:
+        if key in self.open_keys:
+            return True
+        if key in self.closed_keys:
+            return False
+        return default
+
+    def remember(self, key, is_open: bool) -> None:
+        target, other = (
+            (self.open_keys, self.closed_keys) if is_open else (self.closed_keys, self.open_keys)
+        )
+        target.add(key)
+        other.discard(key)
+
+    def set_all(self, keys, is_open: bool) -> None:
+        for key in keys:
+            self.remember(key, is_open)
 
 
 def flatten(nodes: list[TreeNode]) -> list[TreeNode]:
@@ -343,6 +390,80 @@ class Reorder:
     @property
     def touched(self) -> int:
         return len(self.assignments)
+
+
+def descendants(task: Task, tasks: list[Task]) -> set[str]:
+    """Every uid below ``task`` in its own calendar, cycle-safe."""
+    children: dict[str, list[str]] = {}
+    for other in tasks:
+        if other.calendar_id == task.calendar_id and other.parent_uid:
+            children.setdefault(other.parent_uid, []).append(other.uid)
+
+    found: set[str] = set()
+    stack = [task.uid]
+    while stack:
+        for uid in children.get(stack.pop(), ()):
+            if uid not in found:
+                found.add(uid)
+                stack.append(uid)
+    return found
+
+
+def reparent_fields(task: Task, new_parent_uid: str | None, tasks: list[Task]) -> dict | None:
+    """What to write to move ``task`` under ``new_parent_uid``.
+
+    ``None`` when the move is not allowed — onto itself, or onto one of its own
+    descendants, which would build a cycle the tree walker would then have to
+    break.  Refusing here is better than rendering the wreckage afterwards.
+
+    The task lands at the *end* of its new siblings: it has an order value from
+    the group it left, and reusing it would drop the task at an arbitrary point
+    in a group it has never been in.
+    """
+    if new_parent_uid == task.uid or new_parent_uid == task.parent_uid:
+        return None
+    if new_parent_uid is not None and new_parent_uid in descendants(task, tasks):
+        return None
+
+    siblings = [
+        t
+        for t in tasks
+        if t.calendar_id == task.calendar_id
+        and t.parent_uid == new_parent_uid
+        and t.uid != task.uid
+    ]
+    orders = [t.davpunk_order for t in siblings if t.davpunk_order is not None]
+    last = max(orders) if orders else 0
+    return {"parent_uid": new_parent_uid, "davpunk_order": last + ORDER_STEP}
+
+
+def indent_fields(task: Task, tasks: list[Task]) -> dict | None:
+    """Make ``task`` a child of the sibling above it — the outliner convention.
+
+    The first task in a group has nothing to indent under, and says so by
+    returning ``None`` rather than quietly doing nothing else.
+    """
+    siblings = sorted(
+        (t for t in tasks if t.calendar_id == task.calendar_id and t.parent_uid == task.parent_uid),
+        key=sort_key,
+    )
+    index = next((i for i, t in enumerate(siblings) if t.uid == task.uid), None)
+    if index is None or index == 0:
+        return None
+    return reparent_fields(task, siblings[index - 1].uid, tasks)
+
+
+def outdent_fields(task: Task, tasks: list[Task]) -> dict | None:
+    """Promote ``task`` to sit beside its parent.  A root has nowhere to go."""
+    if not task.parent_uid:
+        return None
+    parent = next(
+        (t for t in tasks if t.calendar_id == task.calendar_id and t.uid == task.parent_uid),
+        None,
+    )
+    if parent is None:
+        return None
+    return reparent_fields(task, parent.parent_uid, tasks)
 
 
 def reorder_siblings(siblings: list[Task], moved_uid: str, new_index: int) -> Reorder:

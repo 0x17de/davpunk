@@ -117,6 +117,19 @@ class MainWindow(QMainWindow):
         self._action(edit_menu, "&Move to another list…", self.move_task, "move_task")
         self._action(edit_menu, "&Delete task", self.delete_task, "delete_task")
         edit_menu.addSeparator()
+        self._action(
+            edit_menu,
+            "&Indent (make a subtask)",
+            lambda: self.reparent_selected(vm.indent_fields),
+            "indent",
+        )
+        self._action(
+            edit_menu,
+            "&Outdent (promote to root)",
+            lambda: self.reparent_selected(vm.outdent_fields),
+            "outdent",
+        )
+        edit_menu.addSeparator()
         self._action(edit_menu, "&Preferences…", self.show_settings, shortcut="Ctrl+,")
 
         view_menu = self.menus["View"] = bar.addMenu("&View")
@@ -129,6 +142,9 @@ class MainWindow(QMainWindow):
         self.show_completed_action.triggered.connect(self._toggle_completed)
         self.menu_handlers["Show completed"] = self._toggle_completed
         view_menu.addAction(self.show_completed_action)
+        view_menu.addSeparator()
+        self._action(view_menu, "&Unfold all", lambda: self.set_all_folded(True), "expand_all")
+        self._action(view_menu, "&Fold all", lambda: self.set_all_folded(False), "collapse_all")
 
         help_menu = self.menus["Help"] = bar.addMenu("&Help")
         self._action(help_menu, "&Key bindings", self.show_keymap, "help_overlay")
@@ -237,6 +253,8 @@ class MainWindow(QMainWindow):
             "reorder_up": lambda: self.reorder_selected(-1),
             "card_prev_column": lambda: self.kanban_view.shift_selected(-1),
             "card_next_column": lambda: self.kanban_view.shift_selected(+1),
+            "indent": lambda: self.reparent_selected(vm.indent_fields),
+            "outdent": lambda: self.reparent_selected(vm.outdent_fields),
         }
         for action, handler in handlers.items():
             binding = self.keymap.get(action)
@@ -264,6 +282,32 @@ class MainWindow(QMainWindow):
             self.delete_task()
         elif action == "top":
             self.list_view.tree.setCurrentItem(self.list_view.tree.topLevelItem(0))
+        elif action == "expand_all":
+            self.set_all_folded(True)
+        elif action == "collapse_all":
+            self.set_all_folded(False)
+
+    def set_all_folded(self, is_open: bool) -> None:
+        view = self.current_view()
+        if hasattr(view, "set_all_folded"):
+            view.set_all_folded(is_open)
+
+    def reparent_selected(self, fields_for) -> None:
+        """Indent / outdent, in whichever view has a task selected.
+
+        ``fields_for`` returns ``None`` when the move is not available — the
+        first task in a group has nothing to indent under, a root has nothing
+        to outdent to — and that is a no-op, not an error worth a dialog.
+        """
+        task = self.selected_task()
+        if task is None or task.is_read_only:
+            return
+        tasks = vm.load_tasks(self.conn)
+        fields = fields_for(task, tasks)
+        if fields is None:
+            return
+        cache.update_task_optimistic(task.id, fields, self.conn)
+        self.refresh()
 
     # ------------------------------------------------------------------ views
 

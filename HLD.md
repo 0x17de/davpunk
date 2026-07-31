@@ -1014,6 +1014,36 @@ Column `id`s must be unique; several columns *may* share a `status` — that is
 what the override exists for. An orphaned override falls through to rule 2 and
 is rewritten on the next drag; it is preserved in the ICS meanwhile.
 
+**Hierarchy in the views.** Both the list and the kanban board render tasks as
+trees. Every view shows a *slice* of the task list — one bucket, one column,
+one filter — so the tree builder is given the whole set alongside the slice: a
+child whose parent landed in a different slice is a root here, not a task whose
+parent is missing, and only the latter earns the "linked parent elsewhere"
+marker. In kanban that follows from the model rather than being a special case:
+a column is a status, nesting is `RELATED-TO`, and the two are orthogonal.
+
+**Folding.** Fold state is remembered per `(calendar_id, uid)` across refreshes
+— a rebuild happens every poll, and an unremembered fold re-opens itself. Two
+sets, not one: "never seen" must stay distinguishable from "the user closed
+it". A *heading* is open unless it was closed; a *subtree* is closed unless it
+was opened, because one parent can carry hundreds of children and expanding by
+default buries the rest of the view. A folded parent shows its total descendant
+count, so a fold never hides the fact that there is something to open.
+`expand_all` / `collapse_all` set every currently visible node at once.
+
+Expansion is applied in a **second pass over the finished tree**:
+`QTreeWidgetItem.setExpanded` before the item is inserted into its widget is
+silently dropped.
+
+**Reparenting.** `indent` makes a task a child of the sibling above it,
+`outdent` promotes it to sit beside its parent, and a kanban drop onto a card
+does both nesting and the column move in one `update_task_optimistic` call.
+A move onto the task itself, onto one of its own descendants, or across
+calendars is refused before anything is written — a cycle the tree walker would
+then have to break, or a `RELATED-TO` that could never resolve. The task
+lands at the **end** of its new siblings: the order value it carries belongs to
+the group it left.
+
 **Board filter.** The board carries a filter bar over three axes, all optional
 and combined with AND: **lists** (multi-select), **tags** (multi-select, `any`
 or `all`), and a free-text substring over summary and description. Selection is

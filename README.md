@@ -178,6 +178,23 @@ PASS gpg-key[work]  1A2B3C4D5E6F0003! encrypts to 1A2B3C4D5E6F0003 (on a smartca
 
 If you later rotate that subkey, open Preferences and set the password again.
 
+### Subtasks
+
+Both the list and the kanban board are trees. **Tab** makes the selected task a
+subtask of the one above it, **Shift+Tab** promotes it back out, and on the
+board you can drag a card onto another to do the same — it becomes a subtask
+*and* moves to that card's column.
+
+Folds stick. A subtree starts closed and stays however you left it, across
+refreshes and restarts of the view; a folded parent shows how many tasks it is
+hiding, so `kaufen  (262)` tells you what you are about to open. **z R** unfolds
+everything, **z M** folds it all back, both also under **View**.
+
+On the board a column is a *status* and nesting is a *relation*, so the two are
+independent: a parent in "In Progress" whose subtasks are all done shows no
+children there — they are in the Done column, nested under nothing. That is the
+data, not a display bug.
+
 ### Filtering the board
 
 The kanban board filters on three axes at once: which **lists** (pick several),

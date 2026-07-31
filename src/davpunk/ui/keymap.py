@@ -64,6 +64,8 @@ LABELS: dict[str, str] = {
     "set_priority": "Set priority",
     "set_tags": "Set tags",
     "set_due": "Set due date",
+    "expand_all": "Unfold every subtree",
+    "collapse_all": "Fold every subtree",
     "card_prev_column": "Card to previous column",
     "card_next_column": "Card to next column",
     "focus_prev_column": "Focus previous column",

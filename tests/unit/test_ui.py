@@ -33,6 +33,7 @@ from davpunk.config import DavPunkConfig, RemoteConfig
 from davpunk.conflict.resolver import Mode, Resolution, load_conflict
 from davpunk.core import cache
 from davpunk.models.task import ReadOnlyReason, Status, SyncState
+from davpunk.ui import viewmodel as vm
 from davpunk.ui.dialogs import ConflictDialog, MoveDialog, TaskEditor
 from davpunk.ui.keymap import Keymap
 
@@ -102,7 +103,16 @@ def test_the_default_view_comes_from_config(qapp, conn, calendar_id, db_path):
 
 def _kanban(window):
     window.switch_view(1)
+    window.refresh()
     return window.kanban_view
+
+
+def _list(window):
+    # switch_view only refreshes on an actual change, and the window already
+    # starts on the list.
+    window.switch_view(0)
+    window.refresh()
+    return window.list_view.tree
 
 
 def _tick(button, values):
@@ -110,8 +120,15 @@ def _tick(button, values):
         action.setChecked(action.data() in values)
 
 
+def _column(kanban, column_id):
+    """Every card in a column, nesting included."""
+    from davpunk.ui.views import _walk
+
+    return list(_walk(kanban.lists[column_id]))
+
+
 def _shown(kanban):
-    return sum(kanban.lists[c].count() for c in kanban.lists)
+    return sum(len(_column(kanban, c)) for c in kanban.lists)
 
 
 def test_the_filter_offers_every_calendar_and_only_tags_in_use(
@@ -183,11 +200,162 @@ def test_a_refresh_does_not_destroy_the_open_menus_actions(window, make_task):
     assert [a.data() for a in before] == [a.data() for a in after]
 
 
+# ------------------------------------------------------------- hierarchies
+
+
+def _find(tree, uid):
+    from davpunk.ui.views import TASK_ROLE, _walk
+
+    for item in _walk(tree):
+        task = item.data(0, TASK_ROLE)
+        if task is not None and task.uid == uid:
+            return item
+    return None
+
+
+def test_a_kanban_column_nests_children_under_their_parent(window, make_task):
+    """The board was flat, so a parent and its subtasks were peer cards."""
+    cache.create_task_local(make_task("p", summary="parent"), window.conn)
+    cache.create_task_local(make_task("c", summary="child", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    column = kanban.lists["todo"]
+    assert column.topLevelItemCount() == 1
+    assert _find(column, "p").childCount() == 1
+    assert _find(column, "c").parent() is _find(column, "p")
+
+
+def test_a_folded_parent_says_how_many_it_is_hiding(window, make_task):
+    cache.create_task_local(make_task("p", summary="parent"), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    cache.create_task_local(make_task("g", parent_uid="c"), window.conn)
+    kanban = _kanban(window)
+    assert _find(kanban.lists["todo"], "p").text(0) == "parent  (2)"
+
+
+def test_a_subtree_starts_folded_and_a_bucket_heading_starts_open(window, make_task):
+    cache.create_task_local(make_task("p"), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+    assert not _find(kanban.lists["todo"], "p").isExpanded()
+
+    tree = _list(window)
+    assert tree.topLevelItem(0).isExpanded()
+    assert not _find(tree, "p").isExpanded()
+
+
+def test_a_fold_survives_a_refresh(window, make_task):
+    """A refresh rebuilds every row, and the poll fires every couple of
+    seconds — an unremembered fold would re-open on its own."""
+    cache.create_task_local(make_task("p"), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    _find(kanban.lists["todo"], "p").setExpanded(True)
+    kanban.refresh()
+    assert _find(kanban.lists["todo"], "p").isExpanded()
+
+    _find(kanban.lists["todo"], "p").setExpanded(False)
+    kanban.refresh()
+    assert not _find(kanban.lists["todo"], "p").isExpanded()
+
+
+def test_fold_all_and_unfold_all(window, make_task):
+    cache.create_task_local(make_task("p"), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    kanban.set_all_folded(True)
+    assert _find(kanban.lists["todo"], "p").isExpanded()
+    kanban.set_all_folded(False)
+    assert not _find(kanban.lists["todo"], "p").isExpanded()
+
+
+def test_indent_makes_the_selected_task_a_subtask(window, make_task):
+    """Tab and Shift+Tab were in the keymap and the ? overlay, bound to nothing."""
+    cache.create_task_local(make_task("a", davpunk_order=1000), window.conn)
+    cache.create_task_local(make_task("b", davpunk_order=2000), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "b"))
+
+    window.reparent_selected(vm.indent_fields)
+    assert _find(tree, "b").parent() is _find(tree, "a")
+
+    tree.setCurrentItem(_find(tree, "b"))
+    window.reparent_selected(vm.outdent_fields)
+    assert _find(tree, "b").parent() is not _find(tree, "a")
+
+
+def test_indenting_a_read_only_task_does_nothing(window, make_task):
+    cache.create_task_local(make_task("a", davpunk_order=1000), window.conn)
+    task = make_task("b", davpunk_order=2000)
+    task.read_only_reason = ReadOnlyReason.OVERSIZE
+    cache.create_task_local(task, window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "b"))
+
+    window.reparent_selected(vm.indent_fields)
+    assert _find(tree, "b").parent() is not _find(tree, "a")
+
+
+def test_dropping_a_card_onto_another_nests_it_and_moves_it_there(window, make_task):
+    """A drag used to be accepted by Qt and dropped on the floor: nothing was
+    written, and the next refresh snapped the card back."""
+    cache.create_task_local(make_task("p"), window.conn)
+    cache.create_task_local(make_task("c"), window.conn)
+    kanban = _kanban(window)
+    parent = _find(kanban.lists["todo"], "p")
+    child = _find(kanban.lists["todo"], "c").data(0, _TASK_ROLE())
+
+    kanban._on_drop("inprogress", child, parent.data(0, _TASK_ROLE()))
+
+    moved = _reload(window, child)
+    assert moved.parent_uid == "p"
+    assert moved.status is Status.IN_PROCESS
+
+
+def test_dropping_a_card_on_empty_space_only_moves_it(window, make_task):
+    cache.create_task_local(make_task("c"), window.conn)
+    kanban = _kanban(window)
+    card = _find(kanban.lists["todo"], "c").data(0, _TASK_ROLE())
+
+    kanban._on_drop("done", card, None)
+
+    moved = _reload(window, card)
+    assert moved.parent_uid is None
+    assert moved.status is Status.COMPLETED
+
+
+def test_a_card_cannot_be_nested_under_one_in_another_calendar(
+    window, make_task, other_calendar_id
+):
+    """RELATED-TO resolves within one calendar, so the link would never render."""
+    cache.create_task_local(make_task("p", calendar_id=other_calendar_id), window.conn)
+    cache.create_task_local(make_task("c"), window.conn)
+    kanban = _kanban(window)
+    parent = _find(kanban.lists["todo"], "p").data(0, _TASK_ROLE())
+    child = _find(kanban.lists["todo"], "c").data(0, _TASK_ROLE())
+
+    kanban._on_drop("todo", child, parent)
+
+    assert _reload(window, child).parent_uid is None
+
+
+def _TASK_ROLE():
+    from davpunk.ui.views import TASK_ROLE
+
+    return TASK_ROLE
+
+
+def _reload(window, task):
+    return cache.get_task(task.id, window.conn)
+
+
 def test_switching_views_refreshes(window, make_task):
     cache.create_task_local(make_task("t1", summary="Visible"), window.conn)
     window.switch_view(1)
     qapp_process(window)
-    assert any(window.kanban_view.lists[c].count() for c in window.kanban_view.lists)
+    assert _shown(window.kanban_view)
 
 
 def qapp_process(window) -> None:
@@ -328,7 +496,7 @@ def test_a_card_lands_in_the_column_its_status_names(window, make_task):
     )
     window.switch_view(1)
     window.refresh()
-    assert window.kanban_view.lists["inprogress"].count() == 1
+    assert len(_column(window.kanban_view, "inprogress")) == 1
 
 
 def test_an_override_beats_status(window, make_task):
@@ -338,7 +506,7 @@ def test_an_override_beats_status(window, make_task):
     )
     window.switch_view(1)
     window.refresh()
-    assert window.kanban_view.lists["done"].count() == 1
+    assert len(_column(window.kanban_view, "done")) == 1
 
 
 def test_moving_a_card_writes_both_status_and_the_override(window, synced_task):

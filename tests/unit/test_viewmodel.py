@@ -278,6 +278,114 @@ def test_describe_names_a_single_list_but_counts_several():
 # --------------------------------------------------------------------- trees
 
 
+def test_a_child_whose_parent_is_merely_filtered_out_is_not_marked_elsewhere():
+    """The marker means "another calendar", not "another bucket".
+
+    Every view slices the task list — one bucket, one kanban column, one
+    filter — and a child left on the other side of that cut still has its
+    parent right there in the same calendar.
+    """
+    parent = task("p")
+    child = task("c", parent_uid="p")
+    [node] = vm.build_tree([child], universe=[parent, child])
+    assert not node.linked_parent_elsewhere
+
+
+def test_a_child_whose_parent_really_is_absent_is_still_marked():
+    [node] = vm.build_tree([task("c", parent_uid="gone")], universe=[task("c", parent_uid="gone")])
+    assert node.linked_parent_elsewhere
+
+
+def test_without_a_universe_the_slice_is_the_universe():
+    """The old single-argument behaviour, for callers that pass everything."""
+    [node] = vm.build_tree([task("c", parent_uid="p")])
+    assert node.linked_parent_elsewhere
+
+
+def test_subtree_size_counts_every_descendant_not_just_children():
+    tasks = [task("p"), task("c", parent_uid="p"), task("g", parent_uid="c")]
+    [root] = vm.build_tree(tasks)
+    assert vm.subtree_size(root) == 2
+
+
+# ---------------------------------------------------------------- folding
+
+
+def test_an_unseen_node_takes_the_callers_default():
+    folds = vm.FoldState()
+    assert folds.is_open("x", default=True)
+    assert not folds.is_open("x", default=False)
+
+
+def test_remembering_overrides_the_default_in_both_directions():
+    folds = vm.FoldState()
+    folds.remember("x", True)
+    assert folds.is_open("x", default=False)
+    folds.remember("x", False)
+    assert not folds.is_open("x", default=True)
+
+
+def test_set_all_applies_to_every_key():
+    folds = vm.FoldState()
+    folds.set_all(["a", "b"], True)
+    assert all(folds.is_open(k, default=False) for k in ("a", "b"))
+
+
+# ------------------------------------------------------------ reparenting
+
+
+def test_indent_makes_a_task_a_child_of_the_sibling_above_it():
+    tasks = [task("a", davpunk_order=1000), task("b", davpunk_order=2000)]
+    assert vm.indent_fields(tasks[1], tasks)["parent_uid"] == "a"
+
+
+def test_the_first_task_in_a_group_has_nothing_to_indent_under():
+    tasks = [task("a", davpunk_order=1000), task("b", davpunk_order=2000)]
+    assert vm.indent_fields(tasks[0], tasks) is None
+
+
+def test_an_indented_task_lands_at_the_end_of_its_new_siblings():
+    """Its old order value belongs to the group it left."""
+    tasks = [
+        task("a", davpunk_order=1000),
+        task("existing", parent_uid="a", davpunk_order=5000),
+        task("b", davpunk_order=2000),
+    ]
+    assert vm.indent_fields(tasks[2], tasks)["davpunk_order"] == 5000 + ORDER_STEP
+
+
+def test_outdent_promotes_a_task_to_sit_beside_its_parent():
+    tasks = [task("root"), task("p", parent_uid="root"), task("c", parent_uid="p")]
+    assert vm.outdent_fields(tasks[2], tasks) == {
+        "parent_uid": "root",
+        "davpunk_order": ORDER_STEP,
+    }
+
+
+def test_a_root_has_nowhere_to_outdent_to():
+    assert vm.outdent_fields(task("a"), [task("a")]) is None
+
+
+def test_a_task_cannot_be_reparented_under_its_own_descendant():
+    """Cycles are refused here rather than broken by the tree walker later."""
+    tasks = [task("p"), task("c", parent_uid="p"), task("g", parent_uid="c")]
+    assert vm.reparent_fields(tasks[0], "g", tasks) is None
+
+
+def test_a_task_cannot_be_reparented_under_itself():
+    assert vm.reparent_fields(task("a"), "a", [task("a")]) is None
+
+
+def test_reparenting_where_it_already_is_is_not_a_change():
+    tasks = [task("p"), task("c", parent_uid="p")]
+    assert vm.reparent_fields(tasks[1], "p", tasks) is None
+
+
+def test_descendants_survive_a_cycle_in_the_data():
+    tasks = [task("a", parent_uid="b"), task("b", parent_uid="a")]
+    assert vm.descendants(tasks[0], tasks) == {"a", "b"}
+
+
 def test_children_nest_under_their_parent():
     tree = vm.build_tree([task("p"), task("c", parent_uid="p")])
     assert len(tree) == 1

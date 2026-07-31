@@ -51,6 +51,8 @@ DEFAULT_KEYS: dict[str, str] = {
     "set_priority": "p",
     "set_tags": "t",
     "set_due": "s",
+    "expand_all": "z,R",
+    "collapse_all": "z,M",
     # kanban
     "card_prev_column": "h",
     "card_next_column": "l",
