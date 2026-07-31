@@ -515,3 +515,278 @@ def test_the_written_config_is_valid_and_0600(davpunk_home, tmp_path):
     config = load_config(path)
     assert config.remotes[0].id == "work"
     assert config.remotes[0].gpg_key_id == "0xKEY"
+
+
+# ------------------------------------------------------------------- menu bar
+
+
+def test_the_window_has_a_menu_bar(window):
+    """Preferences used to be reachable only from the first-run wizard, so a
+    setting you got wrong on day one could not be corrected in the app."""
+    menus = [a.text().replace("&", "") for a in window.menuBar().actions()]
+    assert menus == ["File", "Edit", "View", "Help"]
+
+
+def test_preferences_is_reachable_from_the_menu(window):
+    labels = [a.text().replace("&", "") for a in window.menus["Edit"].actions()]
+    assert any("Preferences" in label for label in labels)
+
+
+def test_every_menu_entry_has_a_handler(window):
+    """A menu item that does nothing is worse than no menu item."""
+    for name, menu in window.menus.items():
+        for action in menu.actions():
+            label = action.text().replace("&", "").split("\t")[0]
+            if label:
+                assert label in window.menu_handlers, f"{name} → {label}"
+                assert callable(window.menu_handlers[label])
+
+
+def test_menu_shortcuts_match_the_keymap(window):
+    """The menu and the keymap must not disagree about what a key does."""
+    new_task = next(a for a in window.menus["File"].actions() if "New task" in a.text())
+    assert new_task.shortcut().toString().lower() == window.keymap["new_task"].lower()
+
+
+def test_a_chord_is_shown_but_not_bound_as_a_shortcut(window):
+    """QKeySequence cannot express "d then d"; keyPressEvent handles those."""
+    delete = next(a for a in window.menus["Edit"].actions() if "Delete task" in a.text())
+    assert delete.shortcut().isEmpty()
+    assert window.keymap["delete_task"] in delete.text()
+
+
+def test_show_completed_is_a_checkable_view_entry(window, make_task):
+    cache.create_task_local(
+        make_task("done", summary="Finished", status=Status.COMPLETED), window.conn
+    )
+    window.refresh()
+    assert not window.show_completed_action.isChecked()
+
+    window.show_completed_action.trigger()
+    assert window.show_completed_action.isChecked()
+    assert window.list_view.select_uid("done")
+
+
+def test_the_toolbar_also_offers_preferences(window):
+    """Discoverability: not everyone goes looking in a menu."""
+    assert window.settings_button.text().startswith("Preferences")
+
+
+# ------------------------------------------------------------------ settings
+
+
+@pytest.fixture
+def written_config(davpunk_home):
+    from davpunk import paths
+
+    paths.ensure_dir(paths.config_dir())
+    path = paths.config_file()
+    path.write_text(
+        "# a comment the user wrote\n"
+        "[davpunk]\n"
+        "theme = 'dark'\n\n"
+        "[davpunk.keys]\n"
+        "sync_now = 'Ctrl+S'\n\n"
+        "[[davpunk.remotes]]\n"
+        "id = 'work'\nname = 'Work'\n"
+        "url = 'https://cal.example.test/dav/'\nusername = 'u'\n"
+    )
+    path.chmod(0o600)
+    return path
+
+
+def test_the_settings_dialog_lists_the_configured_accounts(qapp, written_config):
+    from davpunk.config import load_config
+    from davpunk.ui.settings import SettingsDialog
+
+    config = load_config(written_config)
+    dialog = SettingsDialog(config, written_config)
+    assert dialog.remote_list.count() == 1
+    assert "Work" in dialog.remote_list.item(0).text()
+
+
+def test_the_settings_dialog_shows_the_current_general_values(qapp, written_config):
+    from davpunk.config import load_config
+    from davpunk.ui.settings import SettingsDialog
+
+    dialog = SettingsDialog(load_config(written_config), written_config)
+    assert dialog.theme.currentText() == "dark"
+    assert dialog.default_view.currentText() == "list"
+
+
+def test_saving_preserves_comments_and_untouched_sections(qapp, written_config):
+    """A settings dialog that eats your hand-written key bindings is worse than
+    no settings dialog."""
+    from davpunk.config import load_config
+    from davpunk.ui.settings import write_settings
+
+    config = load_config(written_config)
+    write_settings(
+        written_config,
+        general={
+            "theme": "light",
+            "default_view": "kanban",
+            "show_completed": True,
+            "max_resource_bytes": 262144,
+        },
+        remotes=[r.model_dump() for r in config.remotes],
+        mcp={
+            "enabled": True,
+            "capabilities": {"read": True, "write": False, "delete": False, "sync": False},
+        },
+    )
+
+    text = written_config.read_text()
+    assert "# a comment the user wrote" in text
+    assert "sync_now" in text  # the [davpunk.keys] table survived
+
+    back = load_config(written_config)
+    assert back.theme == "light"
+    assert back.default_view == "kanban"
+    assert back.mcp.capabilities.read is True
+    assert back.keymap()["sync_now"] == "Ctrl+S"
+    assert [r.id for r in back.remotes] == ["work"]
+
+
+def test_saving_keeps_the_config_readable(qapp, written_config):
+    """Writing a config that will not load leaves no dialog to explain it."""
+    from davpunk.config import load_config
+    from davpunk.ui.settings import write_settings
+
+    write_settings(
+        written_config,
+        general={
+            "theme": "dark",
+            "default_view": "list",
+            "show_completed": False,
+            "max_resource_bytes": 262144,
+        },
+        remotes=[
+            {
+                "id": "new",
+                "name": "New",
+                "url": "https://other.example.test/dav/",
+                "username": "u",
+                "gpg_key_id": "ABCD1234ABCD1234!",
+                "sync_interval": 300,
+            }
+        ],
+        mcp={
+            "enabled": False,
+            "capabilities": {"read": False, "write": False, "delete": False, "sync": False},
+        },
+    )
+    config = load_config(written_config)
+    assert config.remotes[0].gpg_key_id == "ABCD1234ABCD1234!"
+    assert written_config.stat().st_mode & 0o077 == 0
+
+
+def test_removing_an_account_rewrites_the_list(qapp, written_config):
+    from davpunk.config import load_config
+    from davpunk.ui.settings import write_settings
+
+    write_settings(
+        written_config,
+        general={
+            "theme": "dark",
+            "default_view": "list",
+            "show_completed": False,
+            "max_resource_bytes": 262144,
+        },
+        remotes=[],
+        mcp={
+            "enabled": False,
+            "capabilities": {"read": False, "write": False, "delete": False, "sync": False},
+        },
+    )
+    assert load_config(written_config).remotes == []
+
+
+def test_the_account_id_cannot_be_changed_when_editing(qapp, davpunk_home):
+    """It names the credential and lock files; renaming would orphan both."""
+    from davpunk.ui.remote_form import RemoteForm
+
+    adding = RemoteForm()
+    editing = RemoteForm({"id": "work", "url": "https://x.test/", "username": "u"}, editing=True)
+    assert adding.remote_id.isEnabled()
+    assert not editing.remote_id.isEnabled()
+
+
+# ------------------------------------------------------- field explanations
+
+
+def test_every_form_field_carries_an_explanation(qapp, davpunk_home):
+    """The setup screen should not require you to already know CalDAV."""
+    from davpunk.ui.remote_form import HELP, RemoteForm
+
+    form = RemoteForm()
+    labels = [
+        w.text()
+        for w in form.findChildren(type(form.problem_label))
+        if w.text() and w is not form.problem_label
+    ]
+    for key in ("id", "url", "username", "gpg_key", "sync_interval"):
+        assert any(HELP[key][:40] in label for label in labels), key
+
+
+def test_the_url_help_names_real_servers(qapp):
+    from davpunk.ui.remote_form import HELP
+
+    assert "Nextcloud" in HELP["url"]
+    assert "Radicale" in HELP["url"]
+
+
+def test_the_wizard_explains_what_it_will_ask_for(qapp, davpunk_home):
+    from davpunk.ui.first_run import WelcomePage
+
+    page = WelcomePage()
+    text = " ".join(
+        w.text() for w in page.findChildren(type(page.children()[1])) if hasattr(w, "text")
+    )
+    assert "GPG key" in text
+    assert "Preferences" in text  # tells you it is all changeable later
+
+
+def test_the_key_picker_offers_only_usable_subkeys(qapp, davpunk_home, monkeypatch):
+    from davpunk.core import credentials
+    from davpunk.ui import remote_form
+
+    listing = """\
+sec:u:4096:1:AAAA000000000001:1700951442:0:::::cESCA:::#::23:
+uid:u::::1700951442::ABC::Ada <ada@example.com>::::::::::0:
+ssb:u:4096:1:BBBB000000000002:1700951442:0:::::e:::D276000124010000::23:
+ssb:u:4096:1:CCCC000000000003:1739483354:0:::::e:::#::23:
+"""
+    monkeypatch.setattr(
+        credentials, "list_secret_keys", lambda: credentials.parse_colon_listing(listing)
+    )
+    monkeypatch.setattr(
+        remote_form.credentials,
+        "list_secret_keys",
+        lambda: credentials.parse_colon_listing(listing),
+    )
+
+    form = remote_form.RemoteForm()
+    stored = [form.gpg_key.itemData(i) for i in range(form.gpg_key.count())]
+
+    assert stored == ["BBBB000000000002!"]  # pinned, and only the usable one
+    assert "CCCC000000000003" in form.skipped_note.text()
+    assert "not on this machine" in form.skipped_note.text()
+
+
+def test_a_configured_key_missing_from_the_keyring_is_kept_selectable(
+    qapp, davpunk_home, monkeypatch
+):
+    """Saving must not silently swap the key out from under an existing setup."""
+    from davpunk.ui import remote_form
+
+    monkeypatch.setattr(remote_form.credentials, "list_secret_keys", list)
+    form = remote_form.RemoteForm({"gpg_key_id": "DEAD000000000001!"})
+    assert form.gpg_key.currentData() == "DEAD000000000001!"
+
+
+def test_the_preferences_accelerator_is_actually_bound(window):
+    """Ctrl+, contains a comma, which the chord check used to swallow."""
+    preferences = next(a for a in window.menus["Edit"].actions() if "Preferences" in a.text())
+    assert preferences.shortcut().toString() == "Ctrl+,"
+    assert "\t" not in preferences.text()

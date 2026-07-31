@@ -16,15 +16,12 @@ from pathlib import Path
 
 import tomlkit
 from PySide6.QtWidgets import (
-    QComboBox,
     QDialog,
     QDialogButtonBox,
-    QFormLayout,
     QInputDialog,
     QLabel,
     QLineEdit,
     QMessageBox,
-    QSpinBox,
     QVBoxLayout,
     QWizard,
     QWizardPage,
@@ -32,6 +29,7 @@ from PySide6.QtWidgets import (
 
 from davpunk import paths
 from davpunk.core import credentials
+from davpunk.ui.remote_form import RemoteForm
 
 log = logging.getLogger("davpunk.ui.first_run")
 
@@ -64,85 +62,57 @@ class WelcomePage(QWizardPage):
             QLabel(
                 "DavPunk keeps your CalDAV task lists in a local cache, so every\n"
                 "edit lands instantly and syncs afterwards.\n\n"
-                "Let's add your first remote."
+                "To add your first account you will need:\n"
+                "  •  your CalDAV server's address\n"
+                "  •  the username and password you log in with\n"
+                "  •  a GPG key, which DavPunk uses to encrypt that password\n\n"
+                "Every field is explained on the next page, and you can change\n"
+                "all of it later under Edit → Preferences."
             )
         )
 
 
 class RemotePage(QWizardPage):
-    """Remote details, with ``https://`` enforced and live validation."""
+    """Remote details.  The fields, their explanations and the validation all
+    live in :class:`~davpunk.ui.remote_form.RemoteForm`, so the wizard and the
+    preferences dialog cannot drift apart."""
 
     def __init__(self) -> None:
         super().__init__()
-        self.setTitle("Add a remote")
-        self.setSubTitle("Where your tasks live.")
+        self.setTitle("Add an account")
+        self.setSubTitle("Where your tasks live. Every field is explained below it.")
 
-        form = QFormLayout(self)
-        self.remote_id = QLineEdit("work")
-        self.name = QLineEdit("Work")
-        self.url = QLineEdit("https://")
-        self.url.setPlaceholderText("https://cal.example.com/dav/")
-        self.username = QLineEdit()
-        self.interval = QSpinBox()
-        self.interval.setRange(30, 86400)
-        self.interval.setValue(300)
-        self.interval.setSuffix(" s")
-        self.color = QLineEdit("#4A9EFF")
-
-        self.gpg_key = QComboBox()
-        for key_id, uid in credentials.list_secret_keys():
-            self.gpg_key.addItem(f"{uid}  ({key_id[-16:]})", key_id)
-        if self.gpg_key.count() == 0:
-            self.gpg_key.addItem("(no secret keys found — create one with gpg --gen-key)", None)
-
-        self.problem = QLabel()
-        self.problem.setStyleSheet("color: palette(link-visited)")
-
-        form.addRow("Remote id", self.remote_id)
-        form.addRow("Name", self.name)
-        form.addRow("URL", self.url)
-        form.addRow("Username", self.username)
-        form.addRow("Sync interval", self.interval)
-        form.addRow("Colour", self.color)
-        form.addRow("GPG key", self.gpg_key)
-        form.addRow("", self.problem)
-
-        for widget in (self.remote_id, self.url, self.username):
-            widget.textChanged.connect(self._revalidate)
-        self._revalidate()
-
-    def _revalidate(self) -> None:
-        self.problem.setText(self._problem() or "")
-        self.completeChanged.emit()
-
-    def _problem(self) -> str | None:
-        if not self.remote_id.text().strip():
-            return "A remote id is required; it names the credential and lock files."
-        url = self.url.text().strip()
-        if url.startswith("http://"):
-            return (
-                "http:// sends your password in cleartext. Use https://, or set "
-                "allow_insecure = true in config.toml if you really mean it."
-            )
-        if not url.startswith("https://") or len(url) <= len("https://"):
-            return "The URL must start with https://"
-        if not self.username.text().strip():
-            return "A username is required."
-        return None
+        layout = QVBoxLayout(self)
+        self.form = RemoteForm()
+        self.form.validityChanged.connect(self.completeChanged.emit)
+        layout.addWidget(self.form)
 
     def isComplete(self) -> bool:
-        return self._problem() is None
+        return self.form.is_valid()
 
     def values(self) -> dict[str, object]:
-        return {
-            "id": self.remote_id.text().strip(),
-            "name": self.name.text().strip() or self.remote_id.text().strip(),
-            "url": self.url.text().strip(),
-            "username": self.username.text().strip(),
-            "sync_interval": self.interval.value(),
-            "color": self.color.text().strip(),
-            "gpg_key_id": self.gpg_key.currentData(),
-        }
+        return self.form.values()
+
+    # Kept so existing callers and tests can reach the widgets directly.
+    @property
+    def url(self):
+        return self.form.url
+
+    @property
+    def remote_id(self):
+        return self.form.remote_id
+
+    @property
+    def username(self):
+        return self.form.username
+
+    @property
+    def gpg_key(self):
+        return self.form.gpg_key
+
+    @property
+    def problem(self):
+        return self.form.problem_label
 
 
 class FirstRunWizard(QWizard):
@@ -176,9 +146,9 @@ class FirstRunWizard(QWizard):
         if not key_id:
             QMessageBox.critical(
                 self,
-                "No GPG key",
-                "DavPunk encrypts credentials with GnuPG. Create a key with "
-                "`gpg --gen-key` and run the wizard again.",
+                "No encryption key",
+                "DavPunk encrypts credentials with GnuPG, so it needs a key.\n\n"
+                "Create one with `gpg --full-generate-key`, then run DavPunk again.",
             )
             return False
 

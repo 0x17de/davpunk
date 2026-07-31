@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import sys
+from pathlib import Path
 
 from davpunk import paths
 from davpunk.config import ConfigError, DavPunkConfig, load_config
@@ -68,7 +69,8 @@ def _run_locked(args, _lock_fd) -> int:
     app.setApplicationName("DavPunk")
     app.setOrganizationName("DavPunk")
 
-    config, config_error = _load(args.config)
+    config_path = Path(args.config).expanduser() if args.config else paths.config_file()
+    config, config_error = _load(config_path)
 
     conn, report = cache.open_or_recover()
     if report is not None:
@@ -86,7 +88,7 @@ def _run_locked(args, _lock_fd) -> int:
 
     from davpunk.ui.main_window import MainWindow
 
-    window = MainWindow(config, conn, paths.database_file())
+    window = MainWindow(config, conn, paths.database_file(), config_path)
     window.show()
     return app.exec()
 
@@ -102,7 +104,7 @@ def _load(path) -> tuple[DavPunkConfig, ConfigError | None]:
 def _first_run(args, config, error) -> DavPunkConfig | None:
     from davpunk.ui.first_run import ConfigErrorDialog, FirstRunWizard
 
-    config_path = args.config or paths.config_file()
+    config_path = Path(args.config).expanduser() if args.config else paths.config_file()
     if error is not None:
         ConfigErrorDialog(error, config_path).exec()
 

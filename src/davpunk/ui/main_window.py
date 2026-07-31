@@ -6,7 +6,7 @@ import logging
 import uuid
 
 from PySide6.QtCore import QTimer, Signal
-from PySide6.QtGui import QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QComboBox,
     QLabel,
@@ -18,6 +18,7 @@ from PySide6.QtWidgets import (
     QToolBar,
 )
 
+from davpunk import paths
 from davpunk.conflict.resolver import load_conflict, resolve_conflict
 from davpunk.core import cache
 from davpunk.core.cache import CacheError, ReadOnlyResourceError, TaskConflictError
@@ -25,7 +26,7 @@ from davpunk.core.locking import is_syncing
 from davpunk.models.task import Status, Task
 from davpunk.ui import viewmodel as vm
 from davpunk.ui.dialogs import ConflictDialog, KeymapOverlay, MoveDialog, TaskEditor
-from davpunk.ui.keymap import Keymap
+from davpunk.ui.keymap import Keymap, is_chord
 from davpunk.ui.sync_worker import SyncController
 from davpunk.ui.views import KanbanView, ListView, SearchView
 
@@ -39,10 +40,11 @@ POLL_MS = 2000
 class MainWindow(QMainWindow):
     refreshed = Signal()
 
-    def __init__(self, config, conn, db_path, parent=None) -> None:
+    def __init__(self, config, conn, db_path, config_path=None, parent=None) -> None:
         super().__init__(parent)
         self.config = config
         self.conn = conn
+        self.config_path = config_path or paths.config_file()
         self.keymap = Keymap(config)
         self._fingerprint = (0, 0)
         self._chord_prefix = ""
@@ -62,6 +64,7 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.search_view)
         self.setCentralWidget(self.stack)
 
+        self._build_menu()
         self._build_toolbar()
         self._build_status_bar()
         self._bind_shortcuts()
@@ -80,6 +83,105 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------------------ chrome
 
+    def _build_menu(self) -> None:
+        """A menu bar, so nothing is reachable only once.
+
+        The preferences dialog in particular was previously only ever shown by
+        the first-run wizard, which meant a setting you got wrong on day one
+        could not be corrected without editing config.toml by hand.
+        """
+        bar = self.menuBar()
+        # Held on self: a QMenu returned by addMenu() that only a local
+        # variable references gets collected on the Python side, and every
+        # later menu.actions() call then raises "C++ object already deleted".
+        self.menus: dict[str, object] = {}
+        #: name -> handler, so a menu entry that does nothing is a test failure
+        #: rather than something you find by clicking it.
+        self.menu_handlers: dict[str, object] = {}
+
+        file_menu = self.menus["File"] = bar.addMenu("&File")
+        self._action(file_menu, "&New task", self.new_task, "new_task")
+        self._action(file_menu, "&Sync now", self.sync_now, "sync_now")
+        file_menu.addSeparator()
+        self._action(file_menu, "&Quit", self.close, shortcut="Ctrl+Q")
+
+        edit_menu = self.menus["Edit"] = bar.addMenu("&Edit")
+        self._action(edit_menu, "&Open task", self.open_selected, "open_editor")
+        self._action(edit_menu, "&Move to another list…", self.move_task, "move_task")
+        self._action(edit_menu, "&Delete task", self.delete_task, "delete_task")
+        edit_menu.addSeparator()
+        self._action(edit_menu, "&Preferences…", self.show_settings, shortcut="Ctrl+,")
+
+        view_menu = self.menus["View"] = bar.addMenu("&View")
+        self._action(view_menu, "&List", lambda: self.switch_view(0), "view_list")
+        self._action(view_menu, "&Kanban", lambda: self.switch_view(1), "view_kanban")
+        self._action(view_menu, "&Search", lambda: self.switch_view(2), "view_search")
+        view_menu.addSeparator()
+        self.show_completed_action = QAction("Show &completed", self, checkable=True)
+        self.show_completed_action.setChecked(self.list_view.show_completed)
+        self.show_completed_action.triggered.connect(self._toggle_completed)
+        self.menu_handlers["Show completed"] = self._toggle_completed
+        view_menu.addAction(self.show_completed_action)
+
+        help_menu = self.menus["Help"] = bar.addMenu("&Help")
+        self._action(help_menu, "&Key bindings", self.show_keymap, "help_overlay")
+        self._action(help_menu, "&Run diagnostics…", self.show_doctor)
+        help_menu.addSeparator()
+        self._action(help_menu, "&About DavPunk", self.show_about)
+
+    def _action(self, menu, text, handler, keymap_action=None, shortcut=None):
+        """Menu entries show the same binding the keymap already defines, so
+        the two can never disagree about what a key does."""
+        action = QAction(text, self)
+        binding = shortcut or (self.keymap.get(keymap_action) if keymap_action else None)
+        if binding:
+            # A chord ("d,d") is not a QKeySequence; show it without binding
+            # it, since keyPressEvent already handles those.
+            if is_chord(binding):
+                action.setText(f"{text}\t{binding}")
+            else:
+                action.setShortcut(QKeySequence(binding))
+        action.triggered.connect(handler)
+        self.menu_handlers[text.replace("&", "")] = handler
+        menu.addAction(action)
+        return action
+
+    def _toggle_completed(self) -> None:
+        self.list_view.toggle_show_completed()
+        self.show_completed_action.setChecked(self.list_view.show_completed)
+
+    def show_settings(self) -> None:
+        from davpunk.ui.settings import SettingsDialog
+
+        SettingsDialog(self.config, self.config_path, self).exec()
+
+    def show_doctor(self) -> None:
+        """The same checks as `davpunk doctor`, without leaving the app."""
+        from davpunk.cli import doctor
+
+        checks = doctor.run_all(self.config_path)
+        width = max((len(c.name) for c in checks), default=0)
+        body = "\n".join(f"{c.status.value:<4} {c.name:<{width}}  {c.detail}" for c in checks)
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Diagnostics")
+        failures = [c for c in checks if c.failed]
+        box.setIcon(QMessageBox.Icon.Warning if failures else QMessageBox.Icon.Information)
+        box.setText(f"{len(failures)} check(s) failed." if failures else "All checks passed.")
+        box.setDetailedText(body)
+        box.exec()
+
+    def show_about(self) -> None:
+        QMessageBox.about(
+            self,
+            "About DavPunk",
+            "<h3>DavPunk</h3>"
+            "<p><i>Work it. Sync it. Check it. Done.</i></p>"
+            "<p>A CalDAV VTODO client that keeps everything in a local cache, "
+            "so edits land instantly and sync afterwards.</p>"
+            f"<p>Config: {self.config_path}</p>",
+        )
+
     def _build_toolbar(self) -> None:
         bar = QToolBar("Views")
         bar.setMovable(False)
@@ -96,6 +198,10 @@ class MainWindow(QMainWindow):
         self.sync_button = QPushButton("Sync now")
         self.sync_button.clicked.connect(self.sync_now)
         bar.addWidget(self.sync_button)
+
+        self.settings_button = QPushButton("Preferences…")
+        self.settings_button.clicked.connect(self.show_settings)
+        bar.addWidget(self.settings_button)
 
     def _build_status_bar(self) -> None:
         self.setStatusBar(QStatusBar())
@@ -127,7 +233,7 @@ class MainWindow(QMainWindow):
         }
         for action, handler in handlers.items():
             binding = self.keymap.get(action)
-            if binding and "," not in binding:
+            if binding and not is_chord(binding):
                 QShortcut(QKeySequence(binding), self, activated=handler)
 
     def keyPressEvent(self, event) -> None:

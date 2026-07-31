@@ -139,7 +139,7 @@ sync_interval = 300
 ```sh
 printf %s 'your-password' |
   gpg --batch --yes --trust-model always \
-      --recipient 0x1A2B3C4D5E6F0003 --encrypt \
+      --recipient '1A2B3C4D5E6F0003!' --encrypt \
       -o ~/.config/davpunk/credentials/work.gpg
 chmod 600 ~/.config/davpunk/credentials/work.gpg
 ```
@@ -148,8 +148,47 @@ chmod 600 ~/.config/davpunk/credentials/work.gpg
 password. DavPunk deliberately does not strip trailing whitespace from a
 decrypted credential, because a password may legitimately end in it.
 
+### Which GPG key
+
+Name an **encryption subkey**, with a trailing `!`.
+
+Given a primary key id, GnuPG picks an encryption subkey by its own rules. If
+your key has more than one — common after a rotation, or with one subkey per
+device — it may pick the one whose private half lives on your *other* machine.
+Encryption then succeeds and decryption never does, so every sync fails
+authentication with nothing explaining why.
+
+The `!` pins one subkey. The first-run wizard and **Edit → Preferences** list
+only subkeys this machine can actually decrypt with, already pinned, and say
+why any others were skipped:
+
+```
+$ gpg --list-secret-keys --keyid-format LONG
+ssb>  rsa4096/0x1A2B3C4D5E6F0003  [E]     ← on a smartcard: usable
+ssb#  rsa4096/0x1A2B3C4D5E6F0005  [E]     ← "#": private half is elsewhere
+```
+
+`davpunk doctor` checks this by asking GnuPG what it would really encrypt to,
+rather than guessing:
+
+```
+PASS gpg-key[work]  1A2B3C4D5E6F0003! encrypts to 1A2B3C4D5E6F0003 (on a smartcard)
+```
+
+If you later rotate that subkey, open Preferences and set the password again.
+
 The full config reference — kanban columns, key bindings, MCP — is in
 [HLD.md §16](HLD.md).
+
+## Changing settings later
+
+Everything from the wizard is editable at any time under **Edit → Preferences**:
+accounts, the encryption key, the password, the default view, and which
+permissions the MCP server exposes. **Help → Run diagnostics** is `davpunk
+doctor` without leaving the app.
+
+Configuration is read once at startup, so changes take effect on the next
+start — DavPunk will not reconfigure a sync that is already running.
 
 ## Run
 

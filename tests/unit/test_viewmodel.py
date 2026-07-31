@@ -442,3 +442,15 @@ def test_every_action_is_reachable_without_a_mouse():
     """Hard requirement."""
     keymap = Keymap()
     assert all(action.binding for action in keymap.actions())
+
+
+def test_a_comma_key_is_not_mistaken_for_a_chord():
+    """Ctrl+, is the conventional Preferences accelerator. Treating any binding
+    containing a comma as a two-keystroke sequence silently unbinds it."""
+    from davpunk.ui.keymap import is_chord
+
+    assert is_chord("g,g") is True
+    assert is_chord("d,d") is True
+    assert is_chord("Ctrl+,") is False
+    assert is_chord("Ctrl+R") is False
+    assert is_chord(",") is False

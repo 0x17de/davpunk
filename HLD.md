@@ -871,7 +871,17 @@ timer units per alarm; there is no wake-from-suspend delivery.
   password ending in whitespace. The wizard adds no newline, so there is nothing
   to strip. Hand-encrypted credentials made with `echo` carry a trailing
   newline — documented, with `printf %s` as the manual alternative.
-- `gpg_key_id` is validated against the keyring at config load.
+- `gpg_key_id` names an **encryption subkey**, pinned with a trailing `!`.
+  Given a primary key id GnuPG selects a subkey by its own rules, and a keyring
+  with more than one encryption subkey — after a rotation, or with one per
+  device — can resolve to the subkey whose private half is on another machine.
+  Encryption then succeeds and decryption never does, which is silent and
+  total: the credential file looks fine and every request 401s. The picker
+  therefore offers only subkeys whose secret material is reachable here (colon
+  field 15 is not `#`), already pinned, and names the ones it skipped.
+  `davpunk doctor` verifies the choice by encrypting a throwaway byte and
+  reading the recipient key id back out of the packet, rather than
+  reimplementing GnuPG's selection rules.
 
 > The plaintext credential is never written to disk, never appears in `argv`,
 > never enters shell history, and is never logged or stored in SQLite. It is
@@ -924,7 +934,20 @@ resolves a sample TZID; the D-Bus notification service is reachable; each
 remote's URL resolves with a valid certificate; systemd unit installed and
 active. Exit non-zero on any FAIL. `--fix` repairs file modes only.
 
-### 14.4 Keymap
+### 14.4 Settings
+
+The first-run wizard and **Edit → Preferences** share one `RemoteForm`, so the
+two cannot drift apart, and every field carries a one-line explanation beneath
+it — a CalDAV URL, a GPG key id and a sync interval are not self-explanatory.
+
+Preferences is reachable from the menu bar at all times. Config is read once at
+startup, so the dialog writes `config.toml` through **tomlkit** —
+preserving comments, key bindings and anything else it does not itself edit —
+and states that changes apply on the next start. It reloads the file after
+writing and refuses to close silently if the result would not parse, because a
+config that fails at the *next* launch has no dialog left to explain itself.
+
+### 14.5 Keymap
 
 ```
 Global     j / k          down / up
@@ -953,7 +976,7 @@ Overrides live in `[davpunk.keys]`, validated at load: duplicate bindings are a
 config error, never silently last-wins. **Hard requirement:** every action is
 reachable without a mouse.
 
-### 14.5 Subtasks, ordering, kanban
+### 14.6 Subtasks, ordering, kanban
 
 **Parent resolution.** `parent_uid` is resolved **within the same `calendar_id`
 only** — `uid` is deliberately non-unique across calendars. A `RELATED-TO`

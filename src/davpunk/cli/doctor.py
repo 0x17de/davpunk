@@ -123,6 +123,65 @@ def _file_mode_checks(config: DavPunkConfig, config_path: Path | None) -> Iterat
         yield _mode_check("mcp-token-mode", token, 0o600)
 
 
+def _key_check(remote, keys, unusable) -> Check:
+    """Does the configured key exist *and* can this machine decrypt with it?
+
+    Being in the keyring is not enough.  A subkey whose private half lives
+    elsewhere encrypts perfectly well and then never decrypts — and when the
+    config names a *primary* key, gpg picks the subkey itself and can land on
+    exactly such a one.  So rather than guessing gpg's selection rules, this
+    asks gpg what it would really do.
+    """
+    name = f"gpg-key[{remote.id}]"
+    configured = remote.gpg_key_id
+
+    if not gpg_key_present(configured):
+        return Check(name, Status.FAIL, f"{configured} is not in the keyring")
+
+    target = credentials.resolve_encryption_target(configured)
+    if target is None:
+        return Check(
+            name,
+            Status.WARN,
+            f"{configured} is in the keyring, but a test encryption to it failed; "
+            "run `davpunk doctor` again after checking `gpg --list-secret-keys`",
+        )
+
+    chosen = next((k for k in keys if k.key_id.endswith(target)), None)
+    pinned = configured.endswith("!")
+
+    if chosen is not None and not chosen.secret_available:
+        detail = (
+            f"encrypting to {configured} really uses subkey {target}, whose private "
+            "half is not on this machine — DavPunk could encrypt with it and never "
+            "decrypt. Pick a different encryption subkey in Preferences and set the "
+            "password again."
+        )
+        return Check(name, Status.FAIL, detail)
+
+    where = " (on a smartcard)" if chosen is not None and chosen.on_smartcard else ""
+    if not pinned:
+        return Check(
+            name,
+            Status.WARN,
+            f"{configured} names a primary key, so GnuPG chooses the subkey — today "
+            f"that is {target}{where}, but the choice can change when you add or "
+            "rotate a subkey. Pinning one in Preferences removes the ambiguity.",
+        )
+    return Check(name, Status.PASS, f"{configured} encrypts to {target}{where}")
+
+
+def _group_primaries(keys, subkey):
+    """The primary keys a subkey could be reached through."""
+    primary = None
+    for key in keys:
+        if not key.is_subkey:
+            primary = key
+        elif key is subkey and primary is not None:
+            return [primary]
+    return []
+
+
 def _mode_check(name: str, path: Path, want: int) -> Check:
     mode = path.stat().st_mode & 0o777
     if mode & ~want:
@@ -144,14 +203,12 @@ def _gpg_checks(config: DavPunkConfig) -> Iterator[Check]:
         return
     yield Check("gpg", Status.PASS, shutil.which("gpg") or "gpg")
 
+    keys = credentials.list_secret_keys()
+    unusable = {k.key_id: k for k in credentials.unusable_encryption_keys(keys)}
+
     for remote in config.remotes:
         if remote.gpg_key_id:
-            present = gpg_key_present(remote.gpg_key_id)
-            yield Check(
-                f"gpg-key[{remote.id}]",
-                Status.PASS if present else Status.FAIL,
-                f"{remote.gpg_key_id} {'is in' if present else 'is NOT in'} the keyring",
-            )
+            yield _key_check(remote, keys, unusable)
 
         gpg_file = remote.resolved_gpg_file()
         if not gpg_file.exists():

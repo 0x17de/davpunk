@@ -14,6 +14,17 @@ from dataclasses import dataclass
 from davpunk.config import DEFAULT_KEYS, KEY_CONTEXTS, DavPunkConfig, normalize_binding
 
 
+def is_chord(binding: str) -> bool:
+    """Is this a multi-keystroke sequence rather than one Qt shortcut?
+
+    A chord is comma-*separated* (``g,g``).  A binding whose key simply *is* a
+    comma (``Ctrl+,``, the conventional Preferences accelerator) splits into an
+    empty second part, and treating it as a chord silently unbinds it.
+    """
+    parts = binding.split(",")
+    return len(parts) > 1 and all(part.strip() for part in parts)
+
+
 @dataclass(frozen=True)
 class Action:
     name: str
@@ -24,7 +35,7 @@ class Action:
     @property
     def is_chord(self) -> bool:
         """``gg`` and ``dd`` are two-keystroke sequences, not Qt shortcuts."""
-        return "," in self.binding
+        return is_chord(self.binding)
 
 
 #: Human labels for the overlay, grouped the way the HLD documents them.
