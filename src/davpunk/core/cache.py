@@ -651,7 +651,7 @@ def _move_task_locked(
 
     # Collect the subtree BEFORE retargeting the parent — descendants are found
     # through (calendar_id, parent_uid), which the parent's move invalidates.
-    descendants = _descendants(task_id, conn) if move_subtree else []
+    descendants = descendants_of(task_id, conn) if move_subtree else []
     if not move_subtree:
         _promote_children_to_root(task_id, conn)
 
@@ -1110,8 +1110,14 @@ def children_of(task_id: str, conn: sqlite3.Connection) -> list[str]:
     ]
 
 
-def _descendants(task_id: str, conn: sqlite3.Connection) -> list[str]:
-    """Breadth-first subtree walk with a visited set and a depth cap."""
+def descendants_of(task_id: str, conn: sqlite3.Connection) -> list[str]:
+    """Breadth-first subtree walk with a visited set and a depth cap.
+
+    Breadth-first, so reversing the result is a deepest-first order — which is
+    what deleting a subtree needs: taking the parent out first would promote
+    the children to root and queue a ``RELATED-TO`` removal for every one of
+    them, moments before they are deleted too.
+    """
     out: list[str] = []
     visited = {task_id}
     frontier = [task_id]

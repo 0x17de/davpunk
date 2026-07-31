@@ -529,6 +529,204 @@ def initial_order(siblings: list[Task]) -> int:
     return (max(existing) + ORDER_STEP) if existing else ORDER_STEP
 
 
+# ------------------------------------------------------------------- drops
+
+
+class DropPosition(StrEnum):
+    """Where the drop indicator was when the mouse came up."""
+
+    ON = "on"
+    ABOVE = "above"
+    BELOW = "below"
+
+
+@dataclass
+class ListDrop:
+    """What a list-view drop has to write.
+
+    ``orders`` carries the dragged task and, when a gap closed, the contiguous
+    run that had to be renumbered with it — the same partial rebalance a
+    keyboard reorder does, for the same reason.
+    """
+
+    parent_uid: str | None
+    orders: dict[str, int]
+    rebalanced: bool = False
+
+    @property
+    def touched(self) -> int:
+        return len(self.orders)
+
+
+def plan_list_drop(
+    task: Task, target: Task, position: DropPosition, tasks: list[Task]
+) -> ListDrop | None:
+    """Nest ``task`` under ``target``, or place it beside ``target``.
+
+    ``None`` for every refusal, so the view has one thing to check: onto
+    itself, onto one of its own descendants, into another calendar, or a drop
+    that would not move the task at all.  A cross-calendar drop is refused
+    rather than turned into a move, because ``RELATED-TO`` resolves within one
+    calendar only and the link would never render.
+
+    Dropping onto a bucket heading never reaches here: a heading carries no
+    task, and a bucket is a computed view of DUE rather than a settable field.
+    """
+    if target.calendar_id != task.calendar_id or target.uid == task.uid:
+        return None
+
+    if position is DropPosition.ON:
+        fields = reparent_fields(task, target.uid, tasks)
+        if fields is None:
+            return None
+        return ListDrop(
+            parent_uid=fields["parent_uid"],
+            orders={task.uid: fields["davpunk_order"]},
+        )
+
+    new_parent = target.parent_uid
+    if new_parent == task.uid or (
+        new_parent is not None and new_parent in descendants(task, tasks)
+    ):
+        return None
+
+    siblings = [
+        t
+        for t in tasks
+        if t.calendar_id == task.calendar_id and t.parent_uid == new_parent and t.uid != task.uid
+    ]
+    ordered = sorted(siblings, key=sort_key)
+    index = next((i for i, t in enumerate(ordered) if t.uid == target.uid), None)
+    if index is None:
+        return None
+    if position is DropPosition.BELOW:
+        index += 1
+
+    if task.parent_uid == new_parent:
+        # Removing the task shifts everything after it left by one, so the slot
+        # it already occupies among the *remaining* siblings is its own index.
+        full = sorted([*siblings, task], key=sort_key)
+        current = next(i for i, t in enumerate(full) if t.uid == task.uid)
+        if index == current:
+            return None
+
+    result = reorder_siblings([*siblings, task], task.uid, index)
+    return ListDrop(new_parent, result.assignments, result.rebalanced)
+
+
+# ------------------------------------------------------------------- paste
+
+
+@dataclass
+class TaskClipboard:
+    """What a cut is holding, in this process only.
+
+    Ids rather than whole tasks: the row can change — or be deleted — between
+    the cut and the paste, so a paste re-reads it and a snapshot would write
+    stale values back over it.  ``(calendar_id, uid)`` rides along so a
+    vanished entry can still be named in a message.
+
+    The system clipboard is deliberately not involved.  A local task id means
+    nothing outside this process, and pasting one into a text editor is noise.
+    """
+
+    entries: list[tuple[str, str | None, str]] = field(default_factory=list)
+
+    def cut(self, tasks: list[Task]) -> None:
+        """Replaces whatever was held: there is one clipboard, not a stack."""
+        self.entries = [(t.id, t.calendar_id, t.uid) for t in tasks if t.id]
+
+    def clear(self) -> None:
+        self.entries = []
+
+    @property
+    def is_empty(self) -> bool:
+        return not self.entries
+
+    @property
+    def task_ids(self) -> list[str]:
+        return [entry[0] for entry in self.entries]
+
+
+@dataclass
+class PastePlan:
+    """One cut task's destination.  The planner never writes."""
+
+    task: Task
+    calendar_id: str | None
+    parent_uid: str | None
+    davpunk_order: int
+
+    @property
+    def needs_move(self) -> bool:
+        """A different calendar is a two-stage PUT/DELETE, not a column write."""
+        return self.task.calendar_id != self.calendar_id
+
+    @property
+    def fields(self) -> dict[str, object]:
+        return {"parent_uid": self.parent_uid, "davpunk_order": self.davpunk_order}
+
+
+def plan_paste(cut: list[Task], target: Task | None, tasks: list[Task]) -> list[PastePlan]:
+    """Where each cut task lands when pasted onto ``target``.
+
+    Cut and paste exists for the case a drag cannot reach: a filter is hiding
+    the parent you want, so the two tasks are never on screen together.  The
+    plan is therefore computed against the whole task list, not the slice a
+    view happens to be rendering.
+
+    ``target`` of ``None`` means "become a root task", each in its own
+    calendar.  An empty list means the paste was refused — pasting into your
+    own cut set would build a cycle.  Descendants of another cut task are
+    dropped silently: the ancestor's move already carries them.
+    """
+    if not cut:
+        return []
+
+    if target is not None:
+        for entry in cut:
+            if (target.calendar_id, target.uid) == (entry.calendar_id, entry.uid):
+                return []
+            if target.calendar_id == entry.calendar_id and target.uid in descendants(entry, tasks):
+                return []
+
+    tops = [
+        entry
+        for entry in cut
+        if not any(
+            other.uid != entry.uid
+            and other.calendar_id == entry.calendar_id
+            and entry.uid in descendants(other, tasks)
+            for other in cut
+        )
+    ]
+
+    cut_keys = {(t.calendar_id, t.uid) for t in cut}
+    new_parent = target.uid if target is not None else None
+
+    plans: list[PastePlan] = []
+    last_order: dict[str | None, int] = {}
+    for entry in sorted(tops, key=sort_key):
+        calendar_id = target.calendar_id if target is not None else entry.calendar_id
+        if calendar_id == entry.calendar_id and new_parent == entry.parent_uid:
+            continue  # already exactly where it is being pasted
+
+        if calendar_id not in last_order:
+            siblings = [
+                t
+                for t in tasks
+                if t.calendar_id == calendar_id
+                and t.parent_uid == new_parent
+                and (t.calendar_id, t.uid) not in cut_keys
+            ]
+            last_order[calendar_id] = max(
+                (t.davpunk_order for t in siblings if t.davpunk_order is not None), default=0
+            )
+        last_order[calendar_id] += ORDER_STEP
+        plans.append(PastePlan(entry, calendar_id, new_parent, last_order[calendar_id]))
+    return plans
+
+
 # --------------------------------------------------------------- checklists
 
 

@@ -39,10 +39,15 @@ DEFAULT_KEYS: dict[str, str] = {
     "help_overlay": "?",
     # task
     "new_task": "n",
+    # Shift+N rather than a bare "N": QKeySequence folds an unmodified letter,
+    # so "N" and "n" would be one ambiguous shortcut and neither would fire.
+    "new_subtask": "Shift+N",
     "open_editor": "Return",
     "toggle_complete": "Space",
     "delete_task": "d,d",
     "move_task": "m",
+    "cut_task": "Ctrl+X",
+    "paste_task": "Ctrl+V",
     "inline_rename": "e",
     "indent": "Tab",
     "outdent": "Shift+Tab",

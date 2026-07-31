@@ -5,12 +5,14 @@ from __future__ import annotations
 import logging
 import uuid
 
-from PySide6.QtCore import QTimer, Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QLabel,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
     QStackedWidget,
@@ -40,6 +42,17 @@ POLL_MS = 2000
 VIEW_INDEX = {"list": 0, "kanban": 1, "search": 2}
 
 
+def _name_list(tasks: list[Task], limit: int = 3) -> str:
+    """A confirmation should name what it is about to do, not count it."""
+    names = [f"“{task.summary or task.uid}”" for task in tasks[:limit]]
+    rest = len(tasks) - len(names)
+    if rest:
+        names.append(f"{rest} more")
+    if len(names) == 1:
+        return names[0]
+    return f"{', '.join(names[:-1])} and {names[-1]}"
+
+
 class MainWindow(QMainWindow):
     refreshed = Signal()
 
@@ -51,6 +64,9 @@ class MainWindow(QMainWindow):
         self.keymap = Keymap(config)
         self._fingerprint = (0, 0)
         self._chord_prefix = ""
+        #: What a cut is holding.  In-process: a local task id means nothing
+        #: outside it, and the system clipboard would only carry noise.
+        self.clipboard = vm.TaskClipboard()
 
         self.setWindowTitle("DavPunk")
         self.resize(1100, 720)
@@ -60,6 +76,7 @@ class MainWindow(QMainWindow):
         self.search_view = SearchView(conn)
         for view in (self.list_view, self.kanban_view, self.search_view):
             view.taskActivated.connect(self.open_editor)
+        self.list_view.toast.connect(lambda text: self.statusBar().showMessage(text, 3000))
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.list_view)
@@ -71,6 +88,7 @@ class MainWindow(QMainWindow):
         self._build_toolbar()
         self._build_status_bar()
         self._bind_shortcuts()
+        self._install_context_menus()  # after _build_menu: it reuses the handlers
 
         self.sync = SyncController(db_path, config.remotes, parent=self)
         self.sync.syncFinished.connect(self._on_sync_finished)
@@ -108,6 +126,7 @@ class MainWindow(QMainWindow):
 
         file_menu = self.menus["File"] = bar.addMenu("&File")
         self._action(file_menu, "&New task", self.new_task, "new_task")
+        self._action(file_menu, "New &subtask", self.new_subtask, "new_subtask")
         self._action(file_menu, "&Sync now", self.sync_now, "sync_now")
         self._action(file_menu, "&Preview sync (dry run)…", self.preview_sync)
         file_menu.addSeparator()
@@ -117,6 +136,9 @@ class MainWindow(QMainWindow):
         self._action(edit_menu, "&Open task", self.open_selected, "open_editor")
         self._action(edit_menu, "&Move to another list…", self.move_task, "move_task")
         self._action(edit_menu, "&Delete task", self.delete_task, "delete_task")
+        edit_menu.addSeparator()
+        self._action(edit_menu, "Cu&t", self.cut_task, "cut_task")
+        self._action(edit_menu, "&Paste", self.paste_task, "paste_task")
         edit_menu.addSeparator()
         self._action(
             edit_menu,
@@ -169,6 +191,63 @@ class MainWindow(QMainWindow):
         self.menu_handlers[text.replace("&", "")] = handler
         menu.addAction(action)
         return action
+
+    #: Right-click entries, as ``menu_handlers`` keys.  Naming them by handler
+    #: key rather than by callable is what stops a context entry from quietly
+    #: drifting away from its Edit-menu counterpart.
+    CONTEXT_ENTRIES = (
+        "Open task",
+        "New task",
+        "New subtask",
+        None,
+        "Cut",
+        "Paste",
+        None,
+        "Indent (make a subtask)",
+        "Outdent (promote to root)",
+        "Move to another list…",
+        None,
+        "Delete task",
+    )
+
+    def _install_context_menus(self) -> None:
+        for widget in (
+            self.list_view.tree,
+            self.search_view.results,
+            *self.kanban_view.lists.values(),
+        ):
+            widget.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            widget.customContextMenuRequested.connect(
+                lambda point, source=widget: self._show_context_menu(source, point)
+            )
+
+    def context_menu_for(self, task: Task | None) -> QMenu:
+        """The right-click menu, without showing it — which is what makes it
+        testable, and what keeps ``_show_context_menu`` down to placement."""
+        menu = QMenu(self)
+        for label in self.CONTEXT_ENTRIES:
+            if label is None:
+                menu.addSeparator()
+                continue
+            action = menu.addAction(label)
+            action.setEnabled(self._context_enabled(label, task))
+            action.triggered.connect(self.menu_handlers[label])
+        return menu
+
+    def _context_enabled(self, label: str, task: Task | None) -> bool:
+        if label == "New task":
+            return True
+        if label == "Paste":
+            return not self.clipboard.is_empty
+        return task is not None
+
+    def _show_context_menu(self, widget, point) -> None:
+        item = widget.itemAt(point)
+        # Right-clicking inside a multi-selection acts on all of it; outside
+        # one, it moves the selection to what was actually clicked.
+        if item is not None and not item.isSelected():
+            widget.setCurrentItem(item)
+        self.context_menu_for(self.selected_task()).exec(widget.viewport().mapToGlobal(point))
 
     def _toggle_completed(self) -> None:
         self.list_view.toggle_show_completed()
@@ -241,6 +320,9 @@ class MainWindow(QMainWindow):
         """Everything Qt can bind directly; chords are handled in keyPressEvent."""
         handlers = {
             "new_task": self.new_task,
+            "new_subtask": self.new_subtask,
+            "cut_task": self.cut_task,
+            "paste_task": self.paste_task,
             "open_editor": self.open_selected,
             "toggle_complete": self.toggle_complete,
             "move_task": self.move_task,
@@ -326,9 +408,26 @@ class MainWindow(QMainWindow):
         view = self.current_view()
         return view.selected_task() if hasattr(view, "selected_task") else None
 
+    def selected_tasks(self) -> list[Task]:
+        view = self.current_view()
+        if hasattr(view, "selected_tasks"):
+            return view.selected_tasks()
+        task = self.selected_task()
+        return [task] if task is not None else []
+
     # --------------------------------------------------------------- actions
 
     def new_task(self) -> None:
+        self._create_task()
+
+    def new_subtask(self) -> None:
+        """The same dialog, with the selection already chosen as the parent."""
+        selected = self.selected_task()
+        if selected is None:
+            return
+        self._create_task(parent_uid=selected.uid, calendar_id=selected.calendar_id)
+
+    def _create_task(self, *, parent_uid=None, calendar_id=None) -> None:
         calendars = [r for r in cache.calendar_rows(self.conn) if r["available"]]
         if not calendars:
             QMessageBox.information(
@@ -336,11 +435,21 @@ class MainWindow(QMainWindow):
             )
             return
 
-        task = Task(uid=uuid.uuid4().hex, calendar_id=calendars[0]["id"])
-        editor = TaskEditor(task, self)
+        # Start in the list the user is looking at rather than the first one
+        # that happens to exist: a new task almost always belongs beside the
+        # one that prompted it.
+        selected = self.selected_task()
+        start_in = calendar_id or (selected.calendar_id if selected is not None else None)
+        if start_in not in {row["id"] for row in calendars}:
+            start_in = calendars[0]["id"]
+
+        tasks = vm.load_tasks(self.conn)
+        task = Task(uid=uuid.uuid4().hex, calendar_id=start_in, parent_uid=parent_uid)
+        editor = TaskEditor(task, self, calendars=calendars, tasks=tasks, creating=True)
         if editor.exec() != TaskEditor.DialogCode.Accepted:
             return
 
+        task.calendar_id = editor.calendar_id()
         for field, value in editor.changed_fields().items():
             if field == "categories":
                 task.categories = value
@@ -348,9 +457,15 @@ class MainWindow(QMainWindow):
                 setattr(task, field, value)
         task.summary = task.summary or "New task"
 
-        siblings = vm.load_tasks(self.conn, calendar_ids=[task.calendar_id])
+        # Ordered among its new siblings, not among everything in the list —
+        # an order value is only meaningful inside one sibling group.
+        siblings = [
+            t
+            for t in vm.load_tasks(self.conn, calendar_ids=[task.calendar_id])
+            if t.parent_uid == task.parent_uid
+        ]
         task.davpunk_order = vm.initial_order(siblings)
-        cache.create_task_local(task, self.conn)
+        self._guarded(lambda: cache.create_task_local(task, self.conn))
         self.refresh()
 
     def open_selected(self) -> None:
@@ -364,11 +479,25 @@ class MainWindow(QMainWindow):
             return
 
         fresh = cache.get_task(task.id, self.conn) or task
-        editor = TaskEditor(fresh, self)
+        tasks = vm.load_tasks(self.conn)
+        editor = TaskEditor(fresh, self, calendars=cache.calendar_rows(self.conn), tasks=tasks)
         if editor.exec() != TaskEditor.DialogCode.Accepted:
             return
 
         fields = editor.changed_fields()
+        if "parent_uid" in fields:
+            # Through reparent_fields, so the task also lands at the end of its
+            # new siblings: the order it carries belongs to the group it left.
+            chosen = fields.pop("parent_uid")
+            reparent = vm.reparent_fields(fresh, str(chosen) if chosen else None, tasks)
+            if reparent is None:
+                QMessageBox.warning(
+                    self,
+                    "Cannot reparent",
+                    "A task cannot become a child of itself or of one of its own subtasks.",
+                )
+            else:
+                fields.update(reparent)
         if not fields:
             return
         self._guarded(lambda: cache.update_task_optimistic(fresh.id, fields, self.conn))
@@ -387,19 +516,131 @@ class MainWindow(QMainWindow):
         self.refresh()
 
     def delete_task(self) -> None:
-        task = self.selected_task()
-        if task is None:
+        tasks = self.selected_tasks()
+        if not tasks:
             return
-        confirm = QMessageBox.question(
-            self,
-            "Delete task",
-            f"Delete “{task.summary or task.uid}”?\n\n"
-            "Subtasks are never deleted with their parent; they become root tasks.",
-        )
-        if confirm != QMessageBox.StandardButton.Yes:
+
+        box = QMessageBox(self)
+        box.setWindowTitle("Delete task")
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        box.setDefaultButton(QMessageBox.StandardButton.No)
+        box.setText(f"Delete {_name_list(tasks)}?")
+
+        subtree_box = None
+        if any(cache.children_of(t.id, self.conn) for t in tasks):
+            box.setInformativeText(
+                "Subtasks are not deleted with their parent by default; they become root tasks."
+            )
+            subtree_box = QCheckBox("Delete subtasks as well")
+            box.setCheckBox(subtree_box)
+
+        if box.exec() != QMessageBox.StandardButton.Yes:
             return
-        self._guarded(lambda: cache.delete_task_local(task.id, self.conn))
+
+        subtree = subtree_box is not None and subtree_box.isChecked()
+        self._guarded(lambda: self._delete_all(tasks, subtree=subtree))
         self.refresh()
+
+    def _delete_all(self, tasks: list[Task], *, subtree: bool) -> None:
+        """Deepest-first when the whole subtree goes.
+
+        Taking the parent out first promotes its children to root and queues a
+        ``RELATED-TO`` removal for every one of them — a round trip to the
+        server for a link that is about to be deleted anyway.
+        """
+        seen: set[str] = set()
+        for task in tasks:
+            below = list(reversed(cache.descendants_of(task.id, self.conn))) if subtree else []
+            for task_id in [*below, task.id]:
+                if task_id in seen:
+                    continue
+                seen.add(task_id)
+                cache.delete_task_local(task_id, self.conn)
+
+    # ---------------------------------------------------------- cut and paste
+
+    def cut_task(self) -> None:
+        tasks = self.selected_tasks()
+        if not tasks:
+            return
+        self.clipboard.cut(tasks)
+        self.statusBar().showMessage(
+            f"Cut {_name_list(tasks)} — select a parent and paste, or paste with "
+            "nothing selected to make it a top-level task",
+            8000,
+        )
+
+    def paste_task(self) -> None:
+        """Reparent the cut tasks under the selection.
+
+        This is how a task reaches a parent the filter is hiding: both sides
+        are re-read from the cache rather than taken from the widgets, so the
+        two never have to have been on screen together.  That is the whole
+        reason to cut instead of drag.
+        """
+        if self.clipboard.is_empty:
+            self.statusBar().showMessage("Nothing has been cut", 3000)
+            return
+
+        cut = [t for t in (cache.get_task(i, self.conn) for i in self.clipboard.task_ids) if t]
+        if len(cut) != len(self.clipboard.entries):
+            self.clipboard.clear()
+            QMessageBox.information(
+                self,
+                "Nothing to paste",
+                "What was cut no longer exists. The clipboard has been cleared.",
+            )
+            return
+
+        selected = self.selected_task()
+        target = cache.get_task(selected.id, self.conn) if selected is not None else None
+        plans = vm.plan_paste(cut, target, vm.load_tasks(self.conn))
+        if not plans:
+            if target is None:
+                self.statusBar().showMessage("Already at the top level", 3000)
+            else:
+                QMessageBox.warning(
+                    self,
+                    "Cannot paste",
+                    "A task cannot become a child of itself or of one of its own subtasks.",
+                )
+            return
+
+        move_subtree = True
+        movers = [plan for plan in plans if plan.needs_move]
+        if movers:
+            dialog = MoveDialog(
+                cache.calendar_rows(self.conn),
+                movers[0].task.calendar_id,
+                any(cache.children_of(plan.task.id, self.conn) for plan in movers),
+                self,
+                fixed_target=movers[0].calendar_id,
+                heading=(
+                    f"Pasting here also moves {_name_list([p.task for p in movers])} "
+                    "to another list:"
+                ),
+            )
+            if dialog.exec() != MoveDialog.DialogCode.Accepted:
+                return
+            move_subtree = dialog.wants_subtree()
+
+        if self._guarded(lambda: self._apply_paste(plans, move_subtree=move_subtree)):
+            # A cut is a move, not a copy: pasting the same task twice would
+            # only ever undo the first paste.
+            self.clipboard.clear()
+        self.refresh()
+
+    def _apply_paste(self, plans, *, move_subtree: bool) -> None:
+        for plan in plans:
+            if plan.needs_move:
+                # The move retargets the calendar and the reparent then places
+                # the task under the target.  A failure between the two leaves
+                # it at the root of its new list — visible, rather than lost.
+                cache.move_task_local(
+                    plan.task.id, plan.calendar_id, self.conn, move_subtree=move_subtree
+                )
+            cache.update_task_optimistic(plan.task.id, plan.fields, self.conn)
 
     def move_task(self) -> None:
         task = self.selected_task()
@@ -534,10 +775,15 @@ class MainWindow(QMainWindow):
 
     # -------------------------------------------------------------- plumbing
 
-    def _guarded(self, action) -> None:
-        """Turn the cache layer's refusals into something a user can read."""
+    def _guarded(self, action) -> bool:
+        """Turn the cache layer's refusals into something a user can read.
+
+        Returns whether the write actually happened, so a caller can hold onto
+        state — the clipboard, say — that a failed action must not discard.
+        """
         try:
             action()
+            return True
         except TaskConflictError:
             QMessageBox.warning(
                 self,
@@ -553,6 +799,7 @@ class MainWindow(QMainWindow):
             )
         except CacheError as exc:
             QMessageBox.critical(self, "Could not save", str(exc))
+        return False
 
     def closeEvent(self, event) -> None:
         """Cancel, wait up to 5 s, then detach — the flock releases at process

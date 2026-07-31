@@ -36,6 +36,15 @@ TASK_ROLE = Qt.ItemDataRole.UserRole
 #: bucket headings fold too and have no task behind them.
 FOLD_ROLE = Qt.ItemDataRole.UserRole + 1
 
+#: Qt's drop indicator, in the viewmodel's terms.  ``OnViewport`` is absent on
+#: purpose: a drop into empty space has no target, and falls through to ON with
+#: nothing under it, which every handler already refuses.
+DROP_POSITIONS = {
+    QAbstractItemView.DropIndicatorPosition.OnItem: vm.DropPosition.ON,
+    QAbstractItemView.DropIndicatorPosition.AboveItem: vm.DropPosition.ABOVE,
+    QAbstractItemView.DropIndicatorPosition.BelowItem: vm.DropPosition.BELOW,
+}
+
 
 def fold_key(task: Task) -> tuple:
     """``uid`` is only unique within a calendar, so a fold must be too."""
@@ -61,6 +70,12 @@ def task_item(node: vm.TreeNode) -> QTreeWidgetItem:
     item.setData(0, TASK_ROLE, task)
     item.setData(0, FOLD_ROLE, fold_key(task))
     return item
+
+
+def _tasks_of(items) -> list[Task]:
+    """The tasks behind a selection, headings dropped."""
+    found = (item.data(0, TASK_ROLE) for item in items)
+    return [task for task in found if task is not None]
 
 
 def _walk(tree: QTreeWidget):
@@ -109,6 +124,8 @@ class ListView(QWidget):
 
     taskActivated = Signal(object)
     editRequested = Signal(object)
+    #: A coalesced "reordering N tasks" message for the status bar.
+    toast = Signal(str)
 
     def __init__(self, conn, config, parent=None) -> None:
         super().__init__(parent)
@@ -124,10 +141,10 @@ class ListView(QWidget):
         self._building = False
 
         layout = QVBoxLayout(self)
-        self.tree = QTreeWidget()
+        self.tree = _DropTree()
         self.tree.setHeaderLabels(["Task", "Due", "Priority", "Tags"])
-        self.tree.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
         self.tree.header().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.tree.dropped.connect(self._on_drop)
         self.tree.itemActivated.connect(self._activated)
         self.tree.itemExpanded.connect(lambda item: self._remember(item, True))
         self.tree.itemCollapsed.connect(lambda item: self._remember(item, False))
@@ -210,6 +227,9 @@ class ListView(QWidget):
         item = self.tree.currentItem()
         return item.data(0, TASK_ROLE) if item is not None else None
 
+    def selected_tasks(self) -> list[Task]:
+        return _tasks_of(self.tree.selectedItems())
+
     def select_uid(self, uid: str) -> bool:
         for index in range(self.tree.topLevelItemCount()):
             if self._select_in(self.tree.topLevelItem(index), uid):
@@ -243,7 +263,7 @@ class ListView(QWidget):
         self.refresh()
 
     def reorder(self, task: Task, new_index: int) -> str | None:
-        """Apply a drag, coalescing rapid ones into a single rebalance."""
+        """Apply a keyboard reorder, coalescing rapid ones into one toast."""
         siblings = [
             t
             for t in vm.load_tasks(self.conn, calendar_ids=[task.calendar_id])
@@ -251,42 +271,87 @@ class ListView(QWidget):
         ]
         result = vm.reorder_siblings(siblings, task.uid, new_index)
 
-        by_uid = {t.uid: t for t in siblings}
-        for uid, order in result.assignments.items():
+        self._write_orders(result.assignments, siblings)
+        self.refresh()
+        return self._coalesce(result.touched, result.rebalanced)
+
+    def _on_drop(self, task: Task, onto: Task | None, position) -> None:
+        """A list drop reparents and reorders.  It never touches STATUS.
+
+        The buckets are a computed view of DUE, not a settable field, so a
+        heading is not a drop target — it reaches here as ``onto is None``,
+        which is also what empty space looks like.
+        """
+        if onto is None or task.is_read_only:
+            return
+
+        tasks = vm.load_tasks(self.conn)
+        plan = vm.plan_list_drop(task, onto, position, tasks)
+        if plan is None:
+            return
+
+        siblings = [t for t in tasks if t.calendar_id == task.calendar_id]
+        moved = next((t for t in siblings if t.uid == task.uid), None)
+        if moved is None:
+            return
+
+        # The parent and the order in one call, so an interrupted drop cannot
+        # leave a task nested where its order says it does not belong.
+        cache.update_task_optimistic(
+            moved.id,
+            {"parent_uid": plan.parent_uid, "davpunk_order": plan.orders[task.uid]},
+            self.conn,
+        )
+        self._write_orders(
+            {uid: order for uid, order in plan.orders.items() if uid != task.uid}, siblings
+        )
+
+        self.refresh()
+        message = self._coalesce(plan.touched, plan.rebalanced)
+        if message:
+            self.toast.emit(message)
+
+    def _write_orders(self, orders: dict[str, int], candidates: list[Task]) -> None:
+        by_uid = {t.uid: t for t in candidates}
+        for uid, order in orders.items():
             target = by_uid.get(uid)
             if target is not None:
                 cache.update_task_optimistic(target.id, {"davpunk_order": order}, self.conn)
 
-        self.refresh()
+    def _coalesce(self, touched: int, rebalanced: bool) -> str | None:
+        """Drags inside a 2 s window collapse into a single toast."""
+        if not rebalanced:
+            return None
+        self._pending_reorder += touched
         now = time.monotonic()  # in-process timing is monotonic
-        if result.rebalanced:
-            self._pending_reorder += result.touched
-            if now - self._last_reorder > vm.REORDER_COALESCE_S:
-                self._last_reorder = now
-                count = self._pending_reorder
-                self._pending_reorder = 0
-                return f"reordering {count} tasks"
-        return None
+        if now - self._last_reorder <= vm.REORDER_COALESCE_S:
+            return None
+        self._last_reorder = now
+        count = self._pending_reorder
+        self._pending_reorder = 0
+        return f"reordering {count} tasks"
 
 
-class _ColumnTree(QTreeWidget):
-    """One kanban column, as a tree.
+class _DropTree(QTreeWidget):
+    """A tree whose drops are interpreted by the model rather than by Qt.
 
-    Drops are interpreted here rather than by Qt: the board is a projection of
-    the database, so letting Qt physically move rows would show a state the
-    next refresh contradicts.  The event is consumed, the model is told, and
-    the redraw comes from the data.
+    Every view is a projection of the database, so letting Qt physically move
+    rows would show a state the next refresh contradicts.  The event is
+    consumed, the model is told, and the redraw comes from the data.
+
+    The drag itself is single-task even though the selection is not:
+    ``currentItem()`` is the row the mouse picked up, and dragging a whole
+    selection is a separate gesture from cutting one.
     """
 
-    #: ``(dragged task, task dropped onto or None)``
-    dropped = Signal(object, object)
+    #: ``(dragged task, task dropped onto or None, DropPosition)``
+    dropped = Signal(object, object, object)
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
-        self.setHeaderHidden(True)
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
-        self.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
 
     def dropEvent(self, event) -> None:
         source = event.source()
@@ -296,13 +361,22 @@ class _ColumnTree(QTreeWidget):
             event.ignore()
             return
 
-        onto = None
-        if self.dropIndicatorPosition() == QAbstractItemView.DropIndicatorPosition.OnItem:
-            target = self.itemAt(event.position().toPoint())
-            onto = target.data(0, TASK_ROLE) if target is not None else None
+        position = DROP_POSITIONS.get(self.dropIndicatorPosition(), vm.DropPosition.ON)
+        target = self.itemAt(event.position().toPoint())
+        # A bucket heading carries no task, so it lands here as None and is
+        # refused by every handler — a bucket is a computed view of DUE.
+        onto = target.data(0, TASK_ROLE) if target is not None else None
 
         event.acceptProposedAction()
-        self.dropped.emit(task, onto)
+        self.dropped.emit(task, onto, position)
+
+
+class _ColumnTree(_DropTree):
+    """One kanban column, as a tree."""
+
+    def __init__(self, parent=None) -> None:
+        super().__init__(parent)
+        self.setHeaderHidden(True)
 
 
 class KanbanView(QWidget):
@@ -339,8 +413,12 @@ class KanbanView(QWidget):
             widget.itemActivated.connect(self._activated)
             widget.itemExpanded.connect(lambda item: self._remember(item, True))
             widget.itemCollapsed.connect(lambda item: self._remember(item, False))
+            # Only a drop *onto* a card nests; between two cards the board has
+            # no ordering question to answer, so it is just a column move.
             widget.dropped.connect(
-                lambda task, onto, column_id=column.id: self._on_drop(column_id, task, onto)
+                lambda task, onto, position, column_id=column.id: self._on_drop(
+                    column_id, task, onto if position is vm.DropPosition.ON else None
+                )
             )
             box.addWidget(widget)
             self.lists[column.id] = widget
@@ -449,12 +527,27 @@ class KanbanView(QWidget):
         if task is not None:
             self.taskActivated.emit(task)
 
-    def selected_task(self) -> Task | None:
+    def _focused_list(self) -> _ColumnTree | None:
+        """Which column the user means.
+
+        Focus may have moved to the filter bar or a menu since the click, and
+        a card the user can still see selected is the one they are acting on —
+        without the fallback, every menu-driven action on the board silently
+        does nothing.
+        """
         for widget in self.lists.values():
-            item = widget.currentItem()
-            if item is not None and widget.hasFocus():
-                return item.data(0, TASK_ROLE)
-        return None
+            if widget.hasFocus():
+                return widget
+        return next((w for w in self.lists.values() if w.selectedItems()), None)
+
+    def selected_task(self) -> Task | None:
+        widget = self._focused_list()
+        item = widget.currentItem() if widget is not None else None
+        return item.data(0, TASK_ROLE) if item is not None else None
+
+    def selected_tasks(self) -> list[Task]:
+        widget = self._focused_list()
+        return _tasks_of(widget.selectedItems()) if widget is not None else []
 
     def move_to_column(self, task: Task, column_id: str) -> None:
         """Sets both STATUS and X-DAVPUNK-KANBAN-COL in one update."""
@@ -491,6 +584,7 @@ class SearchView(QWidget):
 
         self.results = QTreeWidget()
         self.results.setHeaderLabels(["Task", "Status", "Due", "List"])
+        self.results.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.results.itemActivated.connect(self._activated)
         layout.addWidget(self.results)
 
@@ -537,3 +631,6 @@ class SearchView(QWidget):
     def selected_task(self) -> Task | None:
         item = self.results.currentItem()
         return item.data(0, TASK_ROLE) if item is not None else None
+
+    def selected_tasks(self) -> list[Task]:
+        return _tasks_of(self.results.selectedItems())

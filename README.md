@@ -185,6 +185,36 @@ subtask of the one above it, **Shift+Tab** promotes it back out, and on the
 board you can drag a card onto another to do the same — it becomes a subtask
 *and* moves to that card's column.
 
+In the list you can drag too: drop a row **onto** another to nest it, or
+**between** two rows to place it there. A drop never changes the status — the
+groups you see are Overdue / Today / Upcoming, which are computed from the due
+date rather than set, so a heading is not a drop target. Every task editor also
+carries a **Parent** picker, which offers only tasks in the same list and never
+the task's own subtree.
+
+**n** starts a new task and **Shift+N** a new subtask of the selection; the
+editor's **List** and **Parent** pickers decide where it lands. Right-clicking
+any task offers the same actions.
+
+### Moving a task when a filter is in the way
+
+A drag needs both tasks on screen, and a filter is precisely what stops that.
+So **Ctrl+X** cuts the selection and **Ctrl+V** pastes it under whatever is
+selected then — change the filter in between, and the two never have to be
+visible together. Paste with nothing selected to make the task top-level.
+
+A cut is a move, not a copy: the clipboard empties once it lands, and it never
+reaches the system clipboard. Pasting into another list is a real move, so
+DavPunk asks first and offers the same "move subtasks too" question the **m**
+dialog does.
+
+### Deleting
+
+**d d**, *Edit → Delete task*, or the right-click menu. Subtasks are not deleted
+with their parent by default — they become top-level tasks — and the
+confirmation offers **Delete subtasks as well** when there are any. Both trees
+take a multiple selection, so delete and cut act on all of it.
+
 Folds stick. A subtree starts closed and stays however you left it, across
 refreshes and restarts of the view; a folded parent shows how many tasks it is
 hiding, so `kaufen  (262)` tells you what you are about to open. **z R** unfolds

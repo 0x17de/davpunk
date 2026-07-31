@@ -443,6 +443,7 @@ exclusively. Every one runs inside `tx()` and applies `Task.canonicalized()`.
 | `resolve_conflict(conflict_id, resolution, merged_task, conn)` | see §12 |
 | `apply_server_version(task_id, parsed, etag, conn) -> bool` | **sync role.** Guarded `UPDATE … WHERE sync_state='clean'`; on `rowcount == 0` returns False and retries next cycle. The guard and the child-table rewrite are one transaction — splitting them is exactly the interleaving this invariant exists to prevent. |
 | `upsert_conflict(...)` | `ON CONFLICT (task_id) WHERE resolved = 0 DO UPDATE` refreshing only the server side; `local_raw_ics` is deliberately **not** refreshed — it is the snapshot the user's pending edit is based on and must stay stable while the dialog is open. Called from within an enclosing `tx()`. |
+| `descendants_of(task_id, conn) -> list[str]` | read-only subtree walk, breadth-first, `visited` set and depth cap 32. Reversed it is a **deepest-first** order, which is what deleting a subtree needs: taking the parent out first promotes its children to root and queues a `RELATED-TO` removal for every one of them, moments before they are deleted too. |
 
 ---
 
@@ -963,10 +964,13 @@ Global     j / k          down / up
            Ctrl+R         sync now
            ?              keybinding overlay
 Task       n              new task
+           Shift+N        new subtask of the selection
            Enter          open editor
            Space          toggle complete
            dd             delete
            m              move to another list
+           Ctrl+X         cut (to reparent by pasting)
+           Ctrl+V         paste under the selection
            e              inline rename
            Tab / S-Tab    indent / outdent (reparent)
            Alt+j / Alt+k  reorder within siblings
@@ -992,7 +996,11 @@ elsewhere" marker and is preserved in the ICS. Only the first
 
 **Orphan policy.** Deleting a parent promotes its children to root: `parent_uid`
 cleared, each marked `dirty` so the `RELATED-TO` removal reaches the server.
-Children are never cascade-deleted.
+Children are never cascade-deleted *by the cache*. Deleting a subtree is an
+explicit choice the user makes in the confirmation dialog — offered only when
+the selection actually has children — and the UI then walks
+`descendants_of` in reverse, deepest-first, so no child is ever promoted on its
+way out.
 
 **Cycle guard.** The tree builder and recursive search walk with a `visited` set
 and a depth cap of 32. On a cycle the link is broken at the repeat, the task
@@ -1043,6 +1051,45 @@ calendars is refused before anything is written — a cycle the tree walker woul
 then have to break, or a `RELATED-TO` that could never resolve. The task
 lands at the **end** of its new siblings: the order value it carries belongs to
 the group it left.
+
+The task editor carries the same choice as a **Parent** picker, offering only
+tasks in the currently selected list and never the task's own subtree, so the
+refusals are unreachable rather than merely enforced. A parent changed there
+goes through `reparent_fields` as well, not straight to the column. Its
+**List** picker is live only while creating: changing the list of a saved task
+is a PUT to the new collection and a DELETE from the old one, which is
+`move_task_local` and its subtree question, not a column write.
+
+**List-view drops.** `plan_list_drop` decides them, Qt-free: a drop **onto** a
+row delegates to `reparent_fields`; a drop **above** or **below** one takes
+that row's parent and goes through `reorder_siblings`, so the partial rebalance
+and the sparse `ORDER_STEP` midpoints are the same code the keyboard reorder
+uses. Parent and order are written in one `update_task_optimistic` call — an
+interrupted drop must not leave a task nested where its order says it does not
+belong. A bucket heading is **not** a drop target: it carries no task, and a
+bucket is a computed view of DUE rather than a settable field. Qt never moves
+the rows itself; the event is consumed, the model is told, and the redraw comes
+from the data.
+
+**Cut and paste.** A drag needs both tasks on screen, which is exactly what a
+filter prevents — so `Ctrl+X` holds a selection and `Ctrl+V` reparents it under
+whatever is selected then, with the filter free to change in between. Both
+sides are re-read from the cache rather than taken from the widgets, so the two
+never have to have been rendered together; that is the whole reason to cut
+rather than drag. Pasting with nothing selected makes the tasks roots.
+
+The clipboard holds task **ids**, not snapshots: the row can change or vanish
+between the cut and the paste, and a paste that wrote a snapshot back would
+undo whatever happened in between. It is in-process only — a local id means
+nothing outside it, and the system clipboard would carry noise. A cut is a
+move, not a copy, so a successful paste empties it; a refused one does not.
+
+`plan_paste` drops any entry that is a descendant of another cut entry — the
+ancestor's move already carries it — and refuses the whole paste if the target
+is inside the cut set. A paste into another calendar is planned as a move and
+prompts with the `MoveDialog` in its fixed-target form, then runs
+`move_task_local` before the reparent: a failure between the two leaves the
+task at the root of its new list, which is visible rather than lost.
 
 **Board filter.** The board carries a filter bar over three axes, all optional
 and combined with AND: **lists** (multi-select), **tags** (multi-select, `any`

@@ -31,7 +31,7 @@ from davpunk.conflict.resolver import (
 )
 from davpunk.models.task import Status, Task
 from davpunk.ui.keymap import Keymap
-from davpunk.ui.viewmodel import checklist_progress
+from davpunk.ui.viewmodel import checklist_progress, descendants
 
 log = logging.getLogger("davpunk.ui.dialogs")
 
@@ -39,13 +39,30 @@ STATUSES = [s.value for s in Status]
 
 
 class TaskEditor(QDialog):
-    """Edit one task.  Read-only tasks show a banner and disable the fields."""
+    """Edit one task.  Read-only tasks show a banner and disable the fields.
 
-    def __init__(self, task: Task, parent=None) -> None:
+    ``calendars`` and ``tasks`` are optional because the two pickers they feed
+    can only be honest about choices they were given: without the calendar rows
+    there is no list to pick from, and without the task list no parent.  A
+    caller that passes neither gets exactly today's editor.
+    """
+
+    def __init__(
+        self,
+        task: Task,
+        parent=None,
+        *,
+        calendars=None,
+        tasks: list[Task] | None = None,
+        creating: bool = False,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle(task.summary or "New task")
         self.task = task
         self._original = task.model_copy(deep=True)
+        self._tasks = list(tasks) if tasks is not None else []
+        self.calendar: QComboBox | None = None
+        self.parent_task: QComboBox | None = None
 
         layout = QVBoxLayout(self)
         banner = _banner_for(task)
@@ -77,8 +94,34 @@ class TaskEditor(QDialog):
         self.location = QLineEdit(task.location or "")
         self.url = QLineEdit(task.url or "")
 
+        if calendars is not None:
+            combo = QComboBox()
+            for row in calendars:
+                if row["available"] or row["id"] == task.calendar_id:
+                    combo.addItem(row["display_name"] or row["href"], row["id"])
+            index = combo.findData(task.calendar_id)
+            if index >= 0:
+                combo.setCurrentIndex(index)
+            # Changing the list of an existing task is a PUT to the new
+            # collection and a DELETE from the old one, not a column write, so
+            # it belongs to the move dialog and its subtree question.
+            combo.setEnabled(creating)
+            if not creating:
+                combo.setToolTip("Use “Move to another list” to change this.")
+            self.calendar = combo
+
+        if tasks is not None:
+            self.parent_task = QComboBox()
+            self._fill_parents()
+            if self.calendar is not None:
+                self.calendar.currentIndexChanged.connect(lambda _index: self._fill_parents())
+
         form.addRow("Summary", self.summary)
         form.addRow("Description", self.description)
+        if self.calendar is not None:
+            form.addRow("List", self.calendar)
+        if self.parent_task is not None:
+            form.addRow("Parent", self.parent_task)
         form.addRow("Status", self.status)
         form.addRow("Priority", self.priority)
         form.addRow("% complete", self.percent)
@@ -101,7 +144,7 @@ class TaskEditor(QDialog):
         layout.addWidget(buttons)
 
         if task.is_read_only or task.sync_state.value == "conflict":
-            for widget in (
+            editable = [
                 self.summary,
                 self.description,
                 self.status,
@@ -112,9 +155,44 @@ class TaskEditor(QDialog):
                 self.categories,
                 self.location,
                 self.url,
-            ):
+                *(w for w in (self.calendar, self.parent_task) if w is not None),
+            ]
+            for widget in editable:
                 widget.setEnabled(False)
             buttons.button(QDialogButtonBox.StandardButton.Save).setEnabled(False)
+
+    def _fill_parents(self) -> None:
+        """Offer only tasks in the selected list, and never a cycle.
+
+        ``RELATED-TO`` resolves within one calendar, so a parent from another
+        one would be a link that never renders; and the task itself or one of
+        its own descendants would be a cycle the tree walker then has to break.
+        """
+        assert self.parent_task is not None
+        wanted = (
+            self.parent_task.currentData() if self.parent_task.count() else self.task.parent_uid
+        )
+        calendar_id = self.calendar_id()
+        forbidden = descendants(self.task, self._tasks) | {self.task.uid}
+
+        self.parent_task.blockSignals(True)
+        self.parent_task.clear()
+        self.parent_task.addItem("(no parent)", None)
+        for candidate in sorted(
+            (t for t in self._tasks if t.calendar_id == calendar_id and t.uid not in forbidden),
+            key=lambda t: ((t.summary or "").casefold(), t.uid),
+        ):
+            self.parent_task.addItem(candidate.summary or candidate.uid, candidate.uid)
+
+        index = self.parent_task.findData(wanted)
+        self.parent_task.setCurrentIndex(max(index, 0))
+        self.parent_task.blockSignals(False)
+
+    def calendar_id(self) -> str | None:
+        """Which list the task belongs to — the picker's, or the task's own."""
+        if self.calendar is None:
+            return self.task.calendar_id
+        return self.calendar.currentData()
 
     def changed_fields(self) -> dict[str, object]:
         """Only what actually changed — an update should not touch every column."""
@@ -139,6 +217,14 @@ class TaskEditor(QDialog):
             fields["location"] = self.location.text() or None
         if self.url.text() != (self._original.url or ""):
             fields["url"] = self.url.text() or None
+
+        if self.parent_task is not None:
+            chosen = self.parent_task.currentData()
+            if chosen != self._original.parent_uid:
+                # The caller routes this through reparent_fields, so the task
+                # also lands at the end of its new siblings rather than keeping
+                # an order value that belongs to the group it left.
+                fields["parent_uid"] = chosen
 
         tags = [t.strip() for t in self.categories.text().split(",") if t.strip()]
         if tags != self._original.categories:
@@ -171,16 +257,32 @@ def _banner_for(task: Task) -> str:
 class MoveDialog(QDialog):
     """Move to another list, with the subtree prompt."""
 
-    def __init__(self, calendars, current_calendar_id, has_children: bool, parent=None) -> None:
+    def __init__(
+        self,
+        calendars,
+        current_calendar_id,
+        has_children: bool,
+        parent=None,
+        *,
+        fixed_target: str | None = None,
+        heading: str | None = None,
+    ) -> None:
         super().__init__(parent)
         self.setWindowTitle("Move to another list")
 
         layout = QVBoxLayout(self)
         self.target = QComboBox()
         for row in calendars:
-            if row["id"] != current_calendar_id and row["available"]:
+            if fixed_target is not None:
+                if row["id"] == fixed_target:
+                    self.target.addItem(row["display_name"] or row["href"], row["id"])
+            elif row["id"] != current_calendar_id and row["available"]:
                 self.target.addItem(row["display_name"] or row["href"], row["id"])
-        layout.addWidget(QLabel("Move to:"))
+        if fixed_target is not None:
+            # A paste already named the destination by where it was pasted; the
+            # combo is here to show it, not to reopen the question.
+            self.target.setEnabled(False)
+        layout.addWidget(QLabel(heading or "Move to:"))
         layout.addWidget(self.target)
 
         self.move_subtree = QCheckBox("Move subtasks too")

@@ -521,7 +521,55 @@ def test_subtask_cycle_does_not_hang_the_walk(conn, synced_task):
     a = synced_task("a")
     synced_task("b", parent_uid="a")
     conn.execute("UPDATE tasks SET parent_uid = 'b' WHERE id = ?", (a,))
-    assert len(cache._descendants(a, conn)) == 1
+    assert len(cache.descendants_of(a, conn)) == 1
+
+
+def test_descendants_of_is_breadth_first(conn, synced_task):
+    """Breadth-first, so reversing it is a deepest-first delete order."""
+    root = synced_task("root")
+    child = synced_task("child", parent_uid="root")
+    grandchild = synced_task("grandchild", parent_uid="child")
+
+    assert cache.descendants_of(root, conn) == [child, grandchild]
+
+
+def test_descendants_of_stops_at_the_calendar_boundary(conn, synced_task, other_calendar_id):
+    root = synced_task("root")
+    stray = synced_task("stray", parent_uid="root")
+    conn.execute("UPDATE tasks SET calendar_id = ? WHERE id = ?", (other_calendar_id, stray))
+
+    assert cache.descendants_of(root, conn) == []
+
+
+def test_deleting_a_subtree_deepest_first_promotes_nothing(conn, synced_task):
+    """Taking the parent out first would promote its children to root and queue
+    a RELATED-TO removal for each, moments before they are deleted too."""
+    root = synced_task("root")
+    synced_task("child", parent_uid="root")
+    synced_task("grandchild", parent_uid="child")
+
+    for task_id in [*reversed(cache.descendants_of(root, conn)), root]:
+        cache.delete_task_local(task_id, conn)
+
+    states = {
+        row["uid"]: row["sync_state"]
+        for row in conn.execute("SELECT uid, sync_state, parent_uid FROM tasks")
+    }
+    assert states == {
+        "root": SyncState.PENDING_DELETE.value,
+        "child": SyncState.PENDING_DELETE.value,
+        "grandchild": SyncState.PENDING_DELETE.value,
+    }
+    parents = {
+        row["uid"]: row["parent_uid"] for row in conn.execute("SELECT uid, parent_uid FROM tasks")
+    }
+    assert parents["child"] == "root"  # never promoted on its way out
+    assert parents["grandchild"] == "child"
+    # Only deletes were queued: no child was promoted, so no RELATED-TO update
+    # was pushed for a link that is about to go anyway.
+    assert [row[0] for row in conn.execute("SELECT DISTINCT change_type FROM pending_changes")] == [
+        "delete"
+    ]
 
 
 # ------------------------------------------------------- apply_server_version

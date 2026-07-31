@@ -28,7 +28,7 @@ pytest.importorskip(
 )
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QMessageBox
 
 from davpunk.config import DavPunkConfig, RemoteConfig
 from davpunk.conflict.resolver import Mode, Resolution, load_conflict
@@ -36,7 +36,7 @@ from davpunk.core import cache
 from davpunk.models.task import ReadOnlyReason, Status, SyncState
 from davpunk.ui import viewmodel as vm
 from davpunk.ui.dialogs import ConflictDialog, MoveDialog, TaskEditor
-from davpunk.ui.keymap import Keymap
+from davpunk.ui.keymap import Keymap, is_chord
 
 pytestmark = pytest.mark.qt
 
@@ -488,6 +488,770 @@ def test_the_blocked_change_count_is_surfaced(window, synced_task):
     assert "1 change" in window.attention.text()
 
 
+# ------------------------------------------------------------------ selection
+
+
+def _select(tree, *uids):
+    """Select several rows, the way an ExtendedSelection click-drag would."""
+    items = [_find(tree, uid) for uid in uids]
+    tree.setCurrentItem(items[0])  # clears the selection, so it goes first
+    for item in items:
+        item.setSelected(True)
+    return items
+
+
+def test_both_trees_allow_a_multiple_selection(window):
+    """Cut and delete act on a selection, so one row at a time is not enough."""
+    from PySide6.QtWidgets import QAbstractItemView
+
+    extended = QAbstractItemView.SelectionMode.ExtendedSelection
+    assert window.list_view.tree.selectionMode() == extended
+    assert all(w.selectionMode() == extended for w in window.kanban_view.lists.values())
+
+
+def test_selected_tasks_returns_the_whole_selection(window, make_task):
+    for uid in ("a", "b", "c"):
+        cache.create_task_local(make_task(uid), window.conn)
+    tree = _list(window)
+    _select(tree, "a", "c")
+
+    assert {t.uid for t in window.selected_tasks()} == {"a", "c"}
+    assert window.selected_task().uid == "a"  # still the first, for older callers
+
+
+def test_a_board_action_survives_focus_leaving_the_column(window, make_task):
+    """Focus moves to the menu or the filter bar the moment you use them; a
+    card the user can still see selected is the one they mean."""
+    cache.create_task_local(make_task("t"), window.conn)
+    kanban = _kanban(window)
+    kanban.select_uid(_find(kanban.lists["todo"], "t").data(0, _TASK_ROLE()))
+
+    assert not any(w.hasFocus() for w in kanban.lists.values())
+    assert window.selected_task().uid == "t"
+    assert [t.uid for t in window.selected_tasks()] == ["t"]
+
+
+# ------------------------------------------------------------- list drag-drop
+
+_ON = vm.DropPosition.ON
+_ABOVE = vm.DropPosition.ABOVE
+_BELOW = vm.DropPosition.BELOW
+
+
+def _task(tree, uid):
+    return _find(tree, uid).data(0, _TASK_ROLE())
+
+
+def test_the_list_tree_actually_accepts_drops(window):
+    """The kanban board once accepted a drag and dropped it on the floor; the
+    list view could not even start one, because nothing set a drag-drop mode."""
+    from PySide6.QtWidgets import QAbstractItemView
+
+    tree = window.list_view.tree
+    assert tree.dragDropMode() == QAbstractItemView.DragDropMode.DragDrop
+    assert tree.defaultDropAction() == Qt.DropAction.MoveAction
+    assert tree.dragEnabled()
+
+
+def test_dropping_a_row_onto_another_nests_it(window, make_task):
+    cache.create_task_local(make_task("a", davpunk_order=1000), window.conn)
+    cache.create_task_local(make_task("b", davpunk_order=2000), window.conn)
+    tree = _list(window)
+
+    window.list_view._on_drop(_task(tree, "b"), _task(tree, "a"), _ON)
+
+    assert _find(tree, "b").parent() is _find(tree, "a")
+
+
+def test_dropping_a_row_between_two_others_reorders_it(window, make_task):
+    for uid, order in (("a", 1000), ("b", 2000), ("c", 3000)):
+        cache.create_task_local(make_task(uid, davpunk_order=order), window.conn)
+    tree = _list(window)
+
+    window.list_view._on_drop(_task(tree, "c"), _task(tree, "a"), _BELOW)
+
+    orders = _orders(window)
+    assert orders["a"] < orders["c"] < orders["b"]
+
+
+def test_dropping_beside_a_row_in_another_group_reparents_and_reorders(window, make_task):
+    """One update, not two: an interrupted drop must not leave a task nested
+    where its order says it does not belong."""
+    cache.create_task_local(make_task("p", davpunk_order=1000), window.conn)
+    cache.create_task_local(make_task("kid", parent_uid="p", davpunk_order=500), window.conn)
+    cache.create_task_local(make_task("loose", davpunk_order=2000), window.conn)
+    tree = _list(window)
+
+    window.list_view._on_drop(_task(tree, "loose"), _task(tree, "kid"), _BELOW)
+
+    moved = _reload(window, _task(tree, "loose"))
+    assert moved.parent_uid == "p"
+    assert moved.davpunk_order > 500
+
+
+def test_dropping_on_a_bucket_heading_does_nothing(window, make_task):
+    """A bucket is a computed view of DUE, not a settable field — and a heading
+    carries no task, so it arrives here as no target at all."""
+    cache.create_task_local(make_task("a"), window.conn)
+    tree = _list(window)
+    before = _orders(window)
+
+    window.list_view._on_drop(_task(tree, "a"), None, _ON)
+
+    assert _orders(window) == before
+    assert _reload(window, _task(tree, "a")).parent_uid is None
+
+
+def test_dropping_a_read_only_row_is_refused(window, make_task):
+    cache.create_task_local(make_task("a", davpunk_order=1000), window.conn)
+    cache.create_task_local(
+        make_task("b", davpunk_order=2000, read_only_reason=ReadOnlyReason.OVERSIZE), window.conn
+    )
+    tree = _list(window)
+
+    window.list_view._on_drop(_task(tree, "b"), _task(tree, "a"), _ON)
+
+    assert _reload(window, _task(tree, "b")).parent_uid is None
+
+
+def test_a_row_cannot_be_dropped_onto_one_in_another_calendar(window, make_task, other_calendar_id):
+    """RELATED-TO resolves within one calendar, so the link would never render."""
+    cache.create_task_local(make_task("there", calendar_id=other_calendar_id), window.conn)
+    cache.create_task_local(make_task("here"), window.conn)
+    tree = _list(window)
+
+    window.list_view._on_drop(_task(tree, "here"), _task(tree, "there"), _ON)
+
+    assert _reload(window, _task(tree, "here")).parent_uid is None
+
+
+def test_a_rebalancing_drop_reports_it_once(window, make_task):
+    for uid, order in (("a", 1000), ("b", 1001), ("c", 5000)):
+        cache.create_task_local(make_task(uid, davpunk_order=order), window.conn)
+    tree = _list(window)
+
+    said = []
+    window.list_view.toast.connect(said.append)
+    window.list_view._on_drop(_task(tree, "c"), _task(tree, "b"), _ABOVE)
+
+    assert said and "reordering" in said[0]
+
+
+class _FakeDrop:
+    """A drop event with a source.
+
+    ``QDropEvent`` takes its source from Qt's live drag manager, and there is
+    no way to set one on a synthetic event — so the parts that can be built for
+    real are, and the source is stood in for.
+    """
+
+    def __init__(self, source, point):
+        self._source = source
+        self._point = point
+        self.accepted = False
+        self.ignored = False
+
+    def source(self):
+        return self._source
+
+    def position(self):
+        return self._point
+
+    def acceptProposedAction(self):
+        self.accepted = True
+
+    def ignore(self):
+        self.ignored = True
+
+
+@pytest.mark.parametrize(
+    ("indicator", "expected"),
+    [
+        ("OnItem", vm.DropPosition.ON),
+        ("AboveItem", vm.DropPosition.ABOVE),
+        ("BelowItem", vm.DropPosition.BELOW),
+        ("OnViewport", vm.DropPosition.ON),
+    ],
+)
+def test_a_drop_event_maps_qts_indicator_to_a_drop_position(
+    window, make_task, monkeypatch, indicator, expected
+):
+    """The seam where a Qt API change would silently break every drop."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QAbstractItemView
+
+    cache.create_task_local(make_task("a"), window.conn)
+    cache.create_task_local(make_task("b"), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "b"))
+
+    monkeypatch.setattr(
+        type(tree),
+        "dropIndicatorPosition",
+        lambda self: getattr(QAbstractItemView.DropIndicatorPosition, indicator),
+    )
+    monkeypatch.setattr(type(tree), "itemAt", lambda self, point: _find(self, "a"))
+
+    seen = []
+    tree.dropped.connect(lambda task, onto, position: seen.append((task.uid, onto.uid, position)))
+    event = _FakeDrop(tree, QPointF(0, 0))
+    tree.dropEvent(event)
+
+    assert seen == [("b", "a", expected)]
+    assert event.accepted
+
+
+def test_a_drop_with_no_dragged_task_is_ignored(window, make_task):
+    """A real QDropEvent: outside a live drag it carries no source at all."""
+    from PySide6.QtCore import QMimeData, QPointF
+    from PySide6.QtGui import QDropEvent
+
+    cache.create_task_local(make_task("a", davpunk_order=1000), window.conn)
+    tree = _list(window)
+    before = _orders(window)
+
+    seen = []
+    tree.dropped.connect(lambda *args: seen.append(args))
+    event = QDropEvent(
+        QPointF(0, 0),
+        Qt.DropAction.MoveAction,
+        QMimeData(),
+        Qt.MouseButton.LeftButton,
+        Qt.KeyboardModifier.NoModifier,
+    )
+    tree.dropEvent(event)
+
+    assert seen == []
+    assert _orders(window) == before
+
+
+def _orders(window):
+    return {
+        row["uid"]: row["davpunk_order"]
+        for row in window.conn.execute("SELECT uid, davpunk_order FROM tasks")
+    }
+
+
+# ------------------------------------------------------------------ new task
+
+
+def _accept_editor(monkeypatch, fill=None):
+    """Run the editor without showing it, filling it in the way a user would."""
+
+    def _exec(editor):
+        if fill is not None:
+            fill(editor)
+        return TaskEditor.DialogCode.Accepted
+
+    monkeypatch.setattr(TaskEditor, "exec", _exec)
+
+
+def test_a_new_task_is_created_with_what_the_editor_holds(window, monkeypatch):
+    _accept_editor(monkeypatch, lambda e: e.summary.setText("Written down"))
+    window.new_task()
+
+    row = window.conn.execute("SELECT summary, sync_state FROM tasks").fetchone()
+    assert row["summary"] == "Written down"
+    assert row["sync_state"] == SyncState.NEW.value
+
+
+def test_cancelling_the_editor_creates_nothing(window, monkeypatch):
+    monkeypatch.setattr(TaskEditor, "exec", lambda self: TaskEditor.DialogCode.Rejected)
+    window.new_task()
+
+    assert window.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_a_task_with_no_summary_still_has_a_name(window, monkeypatch):
+    _accept_editor(monkeypatch)
+    window.new_task()
+
+    assert window.conn.execute("SELECT summary FROM tasks").fetchone()[0] == "New task"
+
+
+def test_creating_needs_a_list_to_create_into(qapp, conn, ui_config, db_path, monkeypatch):
+    """Before the first sync DavPunk does not know any collections, and a task
+    with no calendar_id is one the cache refuses outright."""
+    from davpunk.ui.main_window import MainWindow
+
+    cache.reconcile_remotes(ui_config.remotes, conn)
+    win = MainWindow(ui_config, conn, db_path)
+    try:
+        told = []
+        monkeypatch.setattr(QMessageBox, "information", lambda *a: told.append(a))
+        monkeypatch.setattr(
+            TaskEditor, "exec", lambda self: pytest.fail("the editor must not open")
+        )
+        win.new_task()
+
+        assert told and "No lists yet" in told[0][1]
+    finally:
+        win.sync.stop()
+        win._poll.stop()
+
+
+def test_a_new_task_starts_in_the_list_the_user_is_looking_at(
+    window, make_task, other_calendar_id, monkeypatch
+):
+    cache.create_task_local(make_task("there", calendar_id=other_calendar_id), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "there"))
+
+    seen = {}
+    _accept_editor(monkeypatch, lambda e: seen.update(start=e.calendar.currentData()))
+    window.new_task()
+
+    assert seen["start"] == other_calendar_id
+
+
+def test_the_chosen_list_is_where_the_task_lands(
+    window, calendar_id, other_calendar_id, monkeypatch
+):
+    def pick_the_other(editor):
+        editor.summary.setText("Elsewhere")
+        editor.calendar.setCurrentIndex(editor.calendar.findData(other_calendar_id))
+
+    _accept_editor(monkeypatch, pick_the_other)
+    window.new_task()
+
+    row = window.conn.execute("SELECT calendar_id FROM tasks").fetchone()
+    assert row["calendar_id"] == other_calendar_id
+
+
+def test_a_new_subtask_starts_under_the_selection(window, make_task, monkeypatch):
+    cache.create_task_local(make_task("p"), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "p"))
+
+    seen = {}
+    _accept_editor(
+        monkeypatch,
+        lambda e: (e.summary.setText("Child"), seen.update(parent=e.parent_task.currentData())),
+    )
+    window.new_subtask()
+
+    assert seen["parent"] == "p"
+    row = window.conn.execute("SELECT parent_uid FROM tasks WHERE summary = 'Child'").fetchone()
+    assert row["parent_uid"] == "p"
+
+
+def test_a_new_subtask_needs_a_selection(window, monkeypatch):
+    monkeypatch.setattr(TaskEditor, "exec", lambda self: pytest.fail("nothing was selected"))
+    window.new_subtask()
+
+
+def test_a_new_task_is_ordered_after_its_own_siblings_only(window, make_task, monkeypatch):
+    """An order value is only meaningful inside one sibling group, so a new
+    child must not be pushed past an unrelated root task's order."""
+    cache.create_task_local(make_task("p", davpunk_order=1000), window.conn)
+    cache.create_task_local(make_task("loud", davpunk_order=99000), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "p"))
+
+    _accept_editor(monkeypatch, lambda e: e.summary.setText("Child"))
+    window.new_subtask()
+
+    row = window.conn.execute("SELECT davpunk_order FROM tasks WHERE summary = 'Child'").fetchone()
+    assert row["davpunk_order"] < 99000
+
+
+# --------------------------------------------------------- reparent by editor
+
+
+def test_changing_the_parent_in_the_editor_reparents_the_task(window, make_task, monkeypatch):
+    cache.create_task_local(make_task("p"), window.conn)
+    task_id = cache.create_task_local(make_task("c"), window.conn)
+    window.refresh()
+
+    _accept_editor(
+        monkeypatch, lambda e: e.parent_task.setCurrentIndex(e.parent_task.findData("p"))
+    )
+    window.open_editor(cache.get_task(task_id, window.conn))
+
+    assert cache.get_task_row(task_id, window.conn)["parent_uid"] == "p"
+
+
+def test_a_parent_change_moves_the_order_with_it(window, make_task, monkeypatch):
+    """Through reparent_fields, so the task lands at the end of its new
+    siblings: the order it carries belongs to the group it left."""
+    cache.create_task_local(make_task("p", davpunk_order=1000), window.conn)
+    cache.create_task_local(make_task("kid", parent_uid="p", davpunk_order=7000), window.conn)
+    task_id = cache.create_task_local(make_task("c", davpunk_order=2000), window.conn)
+    window.refresh()
+
+    _accept_editor(
+        monkeypatch, lambda e: e.parent_task.setCurrentIndex(e.parent_task.findData("p"))
+    )
+    window.open_editor(cache.get_task(task_id, window.conn))
+
+    assert cache.get_task_row(task_id, window.conn)["davpunk_order"] > 7000
+
+
+def test_clearing_the_parent_in_the_editor_promotes_the_task(window, make_task, monkeypatch):
+    cache.create_task_local(make_task("p"), window.conn)
+    task_id = cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    window.refresh()
+
+    _accept_editor(monkeypatch, lambda e: e.parent_task.setCurrentIndex(0))
+    window.open_editor(cache.get_task(task_id, window.conn))
+
+    assert cache.get_task_row(task_id, window.conn)["parent_uid"] is None
+
+
+# -------------------------------------------------------------------- delete
+
+
+def _confirm(monkeypatch, answer=None, subtree=False):
+    """Answer the delete confirmation, optionally ticking its checkbox."""
+    answer = QMessageBox.StandardButton.Yes if answer is None else answer
+
+    def _exec(box):
+        if subtree and box.checkBox() is not None:
+            box.checkBox().setChecked(True)
+        return answer
+
+    monkeypatch.setattr(QMessageBox, "exec", _exec)
+
+
+def test_deleting_a_task_queues_it(window, synced_task, monkeypatch):
+    task_id = synced_task("t")
+    window.refresh()
+    window.list_view.select_uid("t")
+
+    _confirm(monkeypatch)
+    window.delete_task()
+
+    assert cache.get_task_row(task_id, window.conn)["sync_state"] == SyncState.PENDING_DELETE.value
+
+
+def test_declining_the_confirmation_deletes_nothing(window, synced_task, monkeypatch):
+    task_id = synced_task("t")
+    window.refresh()
+    window.list_view.select_uid("t")
+
+    _confirm(monkeypatch, answer=QMessageBox.StandardButton.No)
+    window.delete_task()
+
+    assert cache.get_task_row(task_id, window.conn)["sync_state"] == SyncState.CLEAN.value
+
+
+def test_deleting_a_never_synced_task_purges_it(window, make_task, monkeypatch):
+    """"""
+    task_id = cache.create_task_local(make_task("t"), window.conn)
+    window.refresh()
+    window.list_view.select_uid("t")
+
+    _confirm(monkeypatch)
+    window.delete_task()
+
+    assert cache.get_task_row(task_id, window.conn) is None
+    assert window.conn.execute("SELECT COUNT(*) FROM tombstones").fetchone()[0] == 0
+
+
+def test_children_are_promoted_rather_than_deleted_by_default(window, synced_task, monkeypatch):
+    parent = synced_task("p")
+    child = synced_task("c", parent_uid="p")
+    window.refresh()
+    window.list_view.select_uid("p")
+
+    _confirm(monkeypatch)
+    window.delete_task()
+
+    assert cache.get_task_row(parent, window.conn)["sync_state"] == SyncState.PENDING_DELETE.value
+    row = cache.get_task_row(child, window.conn)
+    assert row["parent_uid"] is None
+    assert row["sync_state"] == SyncState.DIRTY.value
+
+
+def test_the_subtree_checkbox_takes_the_children_too(window, synced_task, monkeypatch):
+    parent = synced_task("p")
+    child = synced_task("c", parent_uid="p")
+    grandchild = synced_task("g", parent_uid="c")
+    window.refresh()
+    window.list_view.select_uid("p")
+
+    _confirm(monkeypatch, subtree=True)
+    window.delete_task()
+
+    states = {
+        row["id"]: row["sync_state"]
+        for row in window.conn.execute("SELECT id, sync_state FROM tasks")
+    }
+    assert set(states.values()) == {SyncState.PENDING_DELETE.value}
+    assert set(states) == {parent, child, grandchild}
+    # Deepest-first, so no child was ever promoted on its way out.
+    assert cache.get_task_row(child, window.conn)["parent_uid"] == "p"
+
+
+def test_the_subtree_checkbox_is_absent_without_children(window, synced_task, monkeypatch):
+    """A question with only one answer is not worth asking."""
+    synced_task("lonely")
+    window.refresh()
+    window.list_view.select_uid("lonely")
+
+    seen = {}
+
+    def _exec(box):
+        seen["checkbox"] = box.checkBox()
+        return QMessageBox.StandardButton.No
+
+    monkeypatch.setattr(QMessageBox, "exec", _exec)
+    window.delete_task()
+
+    assert seen["checkbox"] is None
+
+
+def test_deleting_a_multiple_selection_takes_all_of_them(window, synced_task, monkeypatch):
+    ids = [synced_task(uid) for uid in ("a", "b", "c")]
+    tree = _list(window)
+    _select(tree, "a", "c")
+
+    _confirm(monkeypatch)
+    window.delete_task()
+
+    states = {
+        row["id"]: row["sync_state"]
+        for row in window.conn.execute("SELECT id, sync_state FROM tasks")
+    }
+    assert states[ids[0]] == SyncState.PENDING_DELETE.value
+    assert states[ids[2]] == SyncState.PENDING_DELETE.value
+    assert states[ids[1]] == SyncState.CLEAN.value
+
+
+def test_deleting_with_nothing_selected_asks_nothing(window, monkeypatch):
+    monkeypatch.setattr(QMessageBox, "exec", lambda self: pytest.fail("nothing was selected"))
+    window.delete_task()
+
+
+# ------------------------------------------------------------- cut and paste
+
+
+def test_cutting_then_pasting_onto_a_task_nests_it(window, make_task):
+    cache.create_task_local(make_task("p"), window.conn)
+    child = cache.create_task_local(make_task("c"), window.conn)
+    tree = _list(window)
+
+    tree.setCurrentItem(_find(tree, "c"))
+    window.cut_task()
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "p"))
+    window.paste_task()
+
+    assert cache.get_task_row(child, window.conn)["parent_uid"] == "p"
+    assert window.clipboard.is_empty  # a cut is a move, not a copy
+
+
+def test_pasting_with_nothing_selected_promotes_to_the_top_level(window, make_task):
+    cache.create_task_local(make_task("p"), window.conn)
+    child = cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    tree = _list(window)
+
+    tree.setCurrentItem(_find(tree, "c"))
+    window.cut_task()
+    _list(window).setCurrentItem(None)
+    window.paste_task()
+
+    assert cache.get_task_row(child, window.conn)["parent_uid"] is None
+
+
+def test_pasting_into_your_own_subtree_is_refused_and_the_cut_survives(
+    window, make_task, monkeypatch
+):
+    parent = cache.create_task_local(make_task("p"), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    tree = _list(window)
+
+    tree.setCurrentItem(_find(tree, "p"))
+    window.cut_task()
+
+    warned = []
+    monkeypatch.setattr(QMessageBox, "warning", lambda *a: warned.append(a))
+    tree.setCurrentItem(_find(tree, "c"))
+    window.paste_task()
+
+    assert warned
+    assert not window.clipboard.is_empty  # the cut is still there to retarget
+    assert cache.get_task_row(parent, window.conn)["parent_uid"] is None
+
+
+def test_pasting_something_that_was_deleted_clears_the_clipboard(window, make_task, monkeypatch):
+    task_id = cache.create_task_local(make_task("gone"), window.conn)
+    cache.create_task_local(make_task("target"), window.conn)
+    tree = _list(window)
+
+    tree.setCurrentItem(_find(tree, "gone"))
+    window.cut_task()
+    cache.delete_task_local(task_id, window.conn)
+
+    told = []
+    monkeypatch.setattr(QMessageBox, "information", lambda *a: told.append(a))
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "target"))
+    window.paste_task()
+
+    assert told and "no longer exists" in told[0][2]
+    assert window.clipboard.is_empty
+
+
+def test_cutting_several_tasks_pastes_all_of_them_in_order(window, make_task):
+    cache.create_task_local(make_task("p"), window.conn)
+    for uid, order in (("a", 1000), ("b", 2000)):
+        cache.create_task_local(make_task(uid, davpunk_order=order), window.conn)
+    tree = _list(window)
+
+    _select(tree, "a", "b")
+    window.cut_task()
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "p"))
+    window.paste_task()
+
+    orders = _orders(window)
+    parents = {
+        row["uid"]: row["parent_uid"]
+        for row in window.conn.execute("SELECT uid, parent_uid FROM tasks")
+    }
+    assert parents["a"] == parents["b"] == "p"
+    assert orders["a"] < orders["b"]
+
+
+def test_pasting_across_lists_asks_and_then_moves(
+    window, make_task, calendar_id, other_calendar_id, monkeypatch
+):
+    """Pasting into another list is a two-stage PUT/DELETE, so it goes through
+    the move dialog and its subtree question rather than happening silently."""
+    moved = cache.create_task_local(make_task("mover"), window.conn)
+    cache.create_task_local(make_task("target", calendar_id=other_calendar_id), window.conn)
+    tree = _list(window)
+
+    asked = []
+
+    def _exec(dialog):
+        asked.append(dialog.target_calendar_id())
+        return MoveDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(MoveDialog, "exec", _exec)
+
+    tree.setCurrentItem(_find(tree, "mover"))
+    window.cut_task()
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "target"))
+    window.paste_task()
+
+    assert asked == [other_calendar_id]
+    row = cache.get_task_row(moved, window.conn)
+    assert row["calendar_id"] == other_calendar_id
+    assert row["parent_uid"] == "target"
+
+
+def test_declining_the_move_leaves_the_paste_undone(
+    window, make_task, calendar_id, other_calendar_id, monkeypatch
+):
+    moved = cache.create_task_local(make_task("mover"), window.conn)
+    cache.create_task_local(make_task("target", calendar_id=other_calendar_id), window.conn)
+    tree = _list(window)
+
+    monkeypatch.setattr(MoveDialog, "exec", lambda self: MoveDialog.DialogCode.Rejected)
+
+    tree.setCurrentItem(_find(tree, "mover"))
+    window.cut_task()
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "target"))
+    window.paste_task()
+
+    row = cache.get_task_row(moved, window.conn)
+    assert row["calendar_id"] == calendar_id
+    assert row["parent_uid"] is None
+    assert not window.clipboard.is_empty
+
+
+def test_a_cut_reaches_a_parent_the_filter_is_hiding(window, make_task):
+    """The whole reason cut and paste exists: with a filter on, the two tasks
+    are never on screen together, so no drag can connect them."""
+    parent = make_task("p")
+    parent.categories = ["alpha"]
+    cache.create_task_local(parent, window.conn)
+    child = make_task("c")
+    child.categories = ["beta"]
+    child_id = cache.create_task_local(child, window.conn)
+
+    kanban = _kanban(window)
+    kanban._on_filter_changed(vm.TaskFilter(tags=frozenset({"beta"})))
+    assert _find(kanban.lists["todo"], "p") is None  # the parent is not rendered
+    kanban.select_uid(_task(kanban.lists["todo"], "c"))
+    window.cut_task()
+
+    kanban._on_filter_changed(vm.TaskFilter(tags=frozenset({"alpha"})))
+    assert _find(kanban.lists["todo"], "c") is None  # and now the child is not
+    kanban.select_uid(_task(kanban.lists["todo"], "p"))
+    window.paste_task()
+
+    assert cache.get_task_row(child_id, window.conn)["parent_uid"] == "p"
+
+
+def test_cutting_nothing_holds_nothing(window):
+    window.cut_task()
+    assert window.clipboard.is_empty
+
+
+def test_pasting_an_empty_clipboard_says_so(window, make_task):
+    cache.create_task_local(make_task("t"), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "t"))
+
+    window.paste_task()
+
+    assert "Nothing has been cut" in window.statusBar().currentMessage()
+
+
+# ------------------------------------------------------------- context menu
+
+
+def test_the_context_menu_offers_the_task_actions(window, make_task):
+    cache.create_task_local(make_task("t"), window.conn)
+    tree = _list(window)
+    task = _task(tree, "t")
+
+    labels = [a.text() for a in window.context_menu_for(task).actions() if not a.isSeparator()]
+
+    assert labels == [entry for entry in window.CONTEXT_ENTRIES if entry is not None]
+
+
+def test_every_context_entry_shares_the_menu_bars_handler(window, make_task):
+    """Naming them by handler key is what stops a right-click entry from
+    quietly drifting away from its Edit-menu counterpart."""
+    for entry in window.CONTEXT_ENTRIES:
+        if entry is not None:
+            assert entry in window.menu_handlers
+
+
+def test_paste_is_disabled_until_something_is_cut(window, make_task):
+    cache.create_task_local(make_task("t"), window.conn)
+    tree = _list(window)
+    task = _task(tree, "t")
+
+    enabled = {a.text(): a.isEnabled() for a in window.context_menu_for(task).actions()}
+    assert enabled["Paste"] is False
+
+    tree.setCurrentItem(_find(tree, "t"))
+    window.cut_task()
+    enabled = {a.text(): a.isEnabled() for a in window.context_menu_for(task).actions()}
+    assert enabled["Paste"] is True
+
+
+def test_the_task_entries_are_disabled_with_nothing_selected(window):
+    enabled = {a.text(): a.isEnabled() for a in window.context_menu_for(None).actions()}
+
+    assert enabled["New task"] is True
+    assert enabled["Delete task"] is False
+    assert enabled["Cut"] is False
+    assert enabled["Open task"] is False
+
+
+def test_every_tree_answers_a_right_click(window):
+    trees = [window.list_view.tree, window.search_view.results, *window.kanban_view.lists.values()]
+    assert all(t.contextMenuPolicy() == Qt.ContextMenuPolicy.CustomContextMenu for t in trees)
+
+
 # ------------------------------------------------------------------- kanban
 
 
@@ -587,6 +1351,138 @@ def test_the_read_only_banner_explains_why(qapp, make_task):
     assert _banner_for(make_task("t")) == ""
 
 
+def test_without_the_rows_there_are_no_pickers(qapp, make_task):
+    """The two combos can only be honest about choices they were given."""
+    editor = TaskEditor(make_task("t"))
+    assert editor.calendar is None
+    assert editor.parent_task is None
+    assert editor.calendar_id() == make_task("t").calendar_id
+
+
+# ------------------------------------------------------------- editor pickers
+
+
+def test_the_list_picker_starts_on_the_tasks_own_list(qapp, conn, calendar_id, make_task):
+    editor = TaskEditor(make_task("t"), calendars=cache.calendar_rows(conn), creating=True)
+
+    assert editor.calendar.currentData() == calendar_id
+    assert editor.calendar_id() == calendar_id
+
+
+def test_the_list_picker_is_read_only_when_editing(qapp, conn, make_task):
+    """Changing the list of a saved task is a PUT to the new collection and a
+    DELETE from the old one, so it belongs to the move dialog."""
+    editing = TaskEditor(make_task("t"), calendars=cache.calendar_rows(conn))
+    creating = TaskEditor(make_task("t"), calendars=cache.calendar_rows(conn), creating=True)
+
+    assert not editing.calendar.isEnabled()
+    assert creating.calendar.isEnabled()
+
+
+def test_an_unavailable_list_is_offered_only_to_the_task_already_in_it(
+    qapp, conn, calendar_id, other_calendar_id, make_task
+):
+    with cache.tx(conn):
+        cache.mark_calendar_unavailable(other_calendar_id, conn)
+
+    here = TaskEditor(make_task("t"), calendars=cache.calendar_rows(conn), creating=True)
+    there = TaskEditor(
+        make_task("t", calendar_id=other_calendar_id),
+        calendars=cache.calendar_rows(conn),
+        creating=True,
+    )
+
+    assert [here.calendar.itemData(i) for i in range(here.calendar.count())] == [calendar_id]
+    assert other_calendar_id in [there.calendar.itemData(i) for i in range(there.calendar.count())]
+
+
+def test_the_parent_picker_offers_no_parent_first(qapp, make_task):
+    editor = TaskEditor(make_task("t"), tasks=[make_task("t")])
+
+    assert editor.parent_task.itemText(0) == "(no parent)"
+    assert editor.parent_task.itemData(0) is None
+
+
+def test_the_parent_picker_excludes_the_task_and_its_descendants(qapp, make_task):
+    """A cycle refused here is a cycle the tree walker never has to break."""
+    tasks = [
+        make_task("p"),
+        make_task("c", parent_uid="p"),
+        make_task("g", parent_uid="c"),
+        make_task("other"),
+    ]
+    editor = TaskEditor(tasks[0], tasks=tasks)
+
+    offered = {editor.parent_task.itemData(i) for i in range(editor.parent_task.count())}
+    assert offered == {None, "other"}
+
+
+def test_the_parent_picker_only_offers_the_selected_list(
+    qapp, make_task, calendar_id, other_calendar_id
+):
+    """RELATED-TO resolves within one calendar only."""
+    tasks = [make_task("here"), make_task("there", calendar_id=other_calendar_id)]
+    editor = TaskEditor(make_task("t"), tasks=tasks)
+
+    offered = {editor.parent_task.itemData(i) for i in range(editor.parent_task.count())}
+    assert offered == {None, "here"}
+
+
+def test_changing_the_list_repopulates_the_parents(qapp, conn, make_task, other_calendar_id):
+    tasks = [make_task("here"), make_task("there", calendar_id=other_calendar_id)]
+    editor = TaskEditor(
+        make_task("t"), calendars=cache.calendar_rows(conn), tasks=tasks, creating=True
+    )
+    assert editor.parent_task.findData("here") >= 0
+
+    editor.calendar.setCurrentIndex(editor.calendar.findData(other_calendar_id))
+
+    assert editor.parent_task.findData("here") == -1
+    assert editor.parent_task.findData("there") >= 0
+
+
+def test_the_editor_reports_a_changed_parent(qapp, make_task):
+    tasks = [make_task("p"), make_task("t")]
+    editor = TaskEditor(tasks[1], tasks=tasks)
+    assert editor.changed_fields() == {}
+
+    editor.parent_task.setCurrentIndex(editor.parent_task.findData("p"))
+    assert editor.changed_fields() == {"parent_uid": "p"}
+
+
+def test_choosing_no_parent_clears_it(qapp, make_task):
+    tasks = [make_task("p"), make_task("t", parent_uid="p")]
+    editor = TaskEditor(tasks[1], tasks=tasks)
+    assert editor.parent_task.currentData() == "p"
+
+    editor.parent_task.setCurrentIndex(0)
+    assert editor.changed_fields() == {"parent_uid": None}
+
+
+def test_a_read_only_task_disables_the_pickers_too(qapp, conn, make_task):
+    editor = TaskEditor(
+        make_task("t", read_only_reason=ReadOnlyReason.OVERSIZE),
+        calendars=cache.calendar_rows(conn),
+        tasks=[make_task("t")],
+        creating=True,
+    )
+
+    assert not editor.calendar.isEnabled()
+    assert not editor.parent_task.isEnabled()
+
+
+def test_a_conflicted_task_disables_the_pickers_too(qapp, conn, make_task):
+    editor = TaskEditor(
+        make_task("t", sync_state=SyncState.CONFLICT),
+        calendars=cache.calendar_rows(conn),
+        tasks=[make_task("t")],
+        creating=True,
+    )
+
+    assert not editor.calendar.isEnabled()
+    assert not editor.parent_task.isEnabled()
+
+
 # --------------------------------------------------------------- move dialog
 
 
@@ -608,6 +1504,24 @@ def test_an_unavailable_calendar_is_not_a_move_target(qapp, conn, calendar_id, o
         cache.mark_calendar_unavailable(other_calendar_id, conn)
     dialog = MoveDialog(cache.calendar_rows(conn), calendar_id, has_children=False)
     assert dialog.target.count() == 0
+
+
+def test_a_fixed_target_shows_the_destination_without_reopening_it(
+    qapp, conn, calendar_id, other_calendar_id
+):
+    """A paste already named the destination by where it was pasted."""
+    dialog = MoveDialog(
+        cache.calendar_rows(conn),
+        calendar_id,
+        has_children=True,
+        fixed_target=other_calendar_id,
+        heading="Pasting here also moves it:",
+    )
+
+    assert dialog.target.count() == 1
+    assert dialog.target_calendar_id() == other_calendar_id
+    assert not dialog.target.isEnabled()
+    assert dialog.wants_subtree() is True
 
 
 # ----------------------------------------------------------- conflict dialog
@@ -691,12 +1605,47 @@ def test_chords_are_not_registered_as_qt_shortcuts(window):
 
 
 def test_every_bound_action_has_a_handler(window):
-    """A binding with no handler is a key that silently does nothing."""
-    from PySide6.QtGui import QShortcut
+    """A binding with no handler is a key that silently does nothing.
+
+    Checked against everything ``_bind_shortcuts`` claims rather than a hand-
+    picked few, so a handler added without its binding — or the reverse — is a
+    test failure rather than something you find by pressing the key.
+    """
+    from PySide6.QtGui import QKeySequence, QShortcut
 
     bound = {s.key().toString().lower() for s in window.findChildren(QShortcut)}
-    for action in ("new_task", "sync_now", "help_overlay", "move_task"):
-        assert window.keymap[action].lower() in bound
+    handlers = {
+        "new_task",
+        "new_subtask",
+        "cut_task",
+        "paste_task",
+        "open_editor",
+        "toggle_complete",
+        "move_task",
+        "sync_now",
+        "help_overlay",
+        "search",
+        "view_list",
+        "view_kanban",
+        "view_search",
+        "reorder_down",
+        "reorder_up",
+        "card_prev_column",
+        "card_next_column",
+        "indent",
+        "outdent",
+    }
+    for action in handlers:
+        binding = window.keymap[action]
+        if not is_chord(binding):
+            assert QKeySequence(binding).toString().lower() in bound, action
+
+
+def test_cut_and_paste_are_in_the_overlay(window):
+    overlay = window.keymap.overlay_text()
+    assert "Ctrl+X" in overlay
+    assert "Ctrl+V" in overlay
+    assert "New subtask of the selection" in overlay
 
 
 # -------------------------------------------------------------- first run

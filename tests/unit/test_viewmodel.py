@@ -514,6 +514,208 @@ def test_unordered_siblings_can_still_be_reordered():
     assert result.assignments
 
 
+# ------------------------------------------------------------------- drops
+
+ON = vm.DropPosition.ON
+ABOVE = vm.DropPosition.ABOVE
+BELOW = vm.DropPosition.BELOW
+
+
+def group(*uids, parent_uid=None, step=ORDER_STEP):
+    """A sibling group with sparse, evenly spaced orders."""
+    return [
+        task(uid, parent_uid=parent_uid, davpunk_order=(i + 1) * step) for i, uid in enumerate(uids)
+    ]
+
+
+def test_dropping_onto_a_task_nests_it_there():
+    tasks = group("a", "b")
+    plan = vm.plan_list_drop(tasks[1], tasks[0], ON, tasks)
+
+    assert plan.parent_uid == "a"
+    assert plan.orders == {"b": ORDER_STEP}
+
+
+def test_dropping_below_the_last_sibling_lands_last():
+    tasks = group("a", "b", "c")
+    plan = vm.plan_list_drop(tasks[0], tasks[2], BELOW, tasks)
+
+    assert plan.parent_uid is None
+    assert plan.orders["a"] > tasks[2].davpunk_order
+
+
+def test_dropping_above_a_sibling_takes_the_midpoint():
+    tasks = group("a", "b", "c")
+    plan = vm.plan_list_drop(tasks[2], tasks[1], ABOVE, tasks)
+
+    assert plan.orders["c"] == (1000 + 2000) // 2
+    assert plan.rebalanced is False
+
+
+def test_dropping_beside_a_task_in_another_group_reparents_and_orders():
+    """One plan, not a reparent followed by a reorder: an interrupted drop must
+    not leave a task nested where its order says it does not belong."""
+    tasks = [*group("p", "q"), *group("x", parent_uid="p", step=500)]
+    plan = vm.plan_list_drop(tasks[1], tasks[2], BELOW, tasks)
+
+    assert plan.parent_uid == "p"
+    assert plan.orders["q"] > 500
+
+
+def test_a_drop_that_would_not_move_anything_is_refused():
+    tasks = group("a", "b", "c")
+
+    assert vm.plan_list_drop(tasks[1], tasks[0], BELOW, tasks) is None
+    assert vm.plan_list_drop(tasks[1], tasks[2], ABOVE, tasks) is None
+
+
+def test_a_drop_onto_itself_is_refused():
+    tasks = group("a")
+    assert vm.plan_list_drop(tasks[0], tasks[0], ON, tasks) is None
+
+
+def test_a_drop_onto_a_own_descendant_is_refused():
+    """A cycle refused here is a cycle the tree walker never has to break."""
+    tasks = [task("p"), task("c", parent_uid="p"), task("g", parent_uid="c")]
+
+    assert vm.plan_list_drop(tasks[0], tasks[2], ON, tasks) is None
+    assert vm.plan_list_drop(tasks[0], tasks[2], BELOW, tasks) is None
+
+
+def test_a_drop_into_another_calendar_is_refused():
+    """RELATED-TO resolves within one calendar, so the link would never render."""
+    here = task("a")
+    there = task("b")
+    there.calendar_id = "other-calendar"
+
+    assert vm.plan_list_drop(here, there, ON, [here, there]) is None
+    assert vm.plan_list_drop(here, there, ABOVE, [here, there]) is None
+
+
+def test_a_closed_gap_renumbers_the_closed_run_and_says_so():
+    tasks = [
+        task("a", davpunk_order=1000),
+        task("b", davpunk_order=1001),
+        task("c", davpunk_order=5000),
+    ]
+    plan = vm.plan_list_drop(tasks[2], tasks[1], ABOVE, tasks)
+
+    assert plan.rebalanced is True
+    assert len(plan.orders) > 1
+    assert len(set(plan.orders.values())) == len(plan.orders)
+
+
+def test_a_drop_into_an_empty_sibling_group_starts_at_the_step():
+    tasks = group("a", "b")
+    plan = vm.plan_list_drop(tasks[1], tasks[0], ON, tasks)
+
+    assert plan.orders["b"] == ORDER_STEP
+    assert plan.touched == 1
+
+
+# ------------------------------------------------------------------- paste
+
+
+def test_the_clipboard_holds_ids_and_a_new_cut_replaces_the_old():
+    """Ids, not snapshots: the row can change — or be deleted — between the cut
+    and the paste, so the paste re-reads it."""
+    clipboard = vm.TaskClipboard()
+    assert clipboard.is_empty
+
+    first = task("a")
+    first.id = "id-a"
+    clipboard.cut([first])
+    assert clipboard.task_ids == ["id-a"]
+    assert not clipboard.is_empty
+
+    second = task("b")
+    second.id = "id-b"
+    clipboard.cut([second])
+    assert clipboard.task_ids == ["id-b"]
+
+    clipboard.clear()
+    assert clipboard.is_empty
+
+
+def test_a_task_with_no_id_is_not_cuttable():
+    clipboard = vm.TaskClipboard()
+    clipboard.cut([task("unsaved")])
+    assert clipboard.is_empty
+
+
+def test_pasting_onto_a_task_nests_the_cut_task_under_it():
+    tasks = group("a", "b")
+    [plan] = vm.plan_paste([tasks[1]], tasks[0], tasks)
+
+    assert plan.parent_uid == "a"
+    assert plan.calendar_id == "cal"
+    assert plan.needs_move is False
+    assert plan.fields == {"parent_uid": "a", "davpunk_order": ORDER_STEP}
+
+
+def test_pasting_with_no_target_makes_a_root_task():
+    tasks = [task("p", davpunk_order=1000), task("c", parent_uid="p", davpunk_order=500)]
+    [plan] = vm.plan_paste([tasks[1]], None, tasks)
+
+    assert plan.parent_uid is None
+    assert plan.calendar_id == "cal"
+    assert plan.davpunk_order > 1000  # after the roots already there
+
+
+def test_pasting_a_parent_and_its_child_moves_only_the_parent():
+    """The ancestor's move already carries its descendants."""
+    tasks = [task("t"), task("p"), task("c", parent_uid="p")]
+    plans = vm.plan_paste([tasks[1], tasks[2]], tasks[0], tasks)
+
+    assert [plan.task.uid for plan in plans] == ["p"]
+
+
+def test_pasting_into_your_own_cut_set_is_refused():
+    tasks = [task("p"), task("c", parent_uid="p"), task("g", parent_uid="c")]
+
+    assert vm.plan_paste([tasks[0]], tasks[2], tasks) == []
+    assert vm.plan_paste([tasks[0]], tasks[0], tasks) == []
+
+
+def test_pasting_where_it_already_is_is_not_a_change():
+    tasks = [task("p"), task("c", parent_uid="p")]
+    assert vm.plan_paste([tasks[1]], tasks[0], tasks) == []
+
+
+def test_several_pasted_tasks_keep_their_order_and_do_not_collide():
+    tasks = [task("t"), *group("a", "b", "c")]
+    plans = vm.plan_paste(tasks[1:], tasks[0], tasks)
+
+    assert [plan.task.uid for plan in plans] == ["a", "b", "c"]
+    orders = [plan.davpunk_order for plan in plans]
+    assert orders == sorted(orders)
+    assert len(set(orders)) == 3
+
+
+def test_an_existing_child_of_the_target_is_not_overwritten():
+    tasks = [task("t"), task("kid", parent_uid="t", davpunk_order=9000), task("a")]
+    [plan] = vm.plan_paste([tasks[2]], tasks[0], tasks)
+
+    assert plan.davpunk_order > 9000
+
+
+def test_a_cross_calendar_paste_is_planned_as_a_move():
+    """It is reported rather than dropped: the caller runs move_task_local
+    first, then the reparent."""
+    here = task("a")
+    there = task("t")
+    there.calendar_id = "other-calendar"
+    [plan] = vm.plan_paste([here], there, [here, there])
+
+    assert plan.needs_move is True
+    assert plan.calendar_id == "other-calendar"
+    assert plan.parent_uid == "t"
+
+
+def test_pasting_nothing_plans_nothing():
+    assert vm.plan_paste([], task("t"), [task("t")]) == []
+
+
 # ---------------------------------------------------------------- checklists
 
 
