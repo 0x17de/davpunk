@@ -689,3 +689,22 @@ def test_calling_a_tool_through_the_sdk_returns_the_structured_error(conn, calen
     result = asyncio.run(server.build_server(ctx).call_tool("get_task", {"task_ref": "nope"}))
     text = result.content[0].text if hasattr(result, "content") else str(result)
     assert "malformed_task_ref" in text
+
+
+def test_the_token_lands_beside_the_config_by_default(davpunk_home):
+    """A hardcoded ~/... default ignores XDG_CONFIG_HOME and puts the token
+    somewhere other than the config.toml it belongs to."""
+    from davpunk import paths
+
+    path = McpConfig().token_path()
+    assert path == paths.mcp_token_file()
+    assert str(davpunk_home) in str(path)
+
+
+def test_an_explicit_token_file_is_still_honoured(davpunk_home, tmp_path):
+    config = McpConfig(token_file=str(tmp_path / "elsewhere.token"))
+    assert config.token_path() == tmp_path / "elsewhere.token"
+
+
+def test_a_tilde_in_the_token_path_is_expanded():
+    assert not str(McpConfig(token_file="~/x.token").token_path()).startswith("~")

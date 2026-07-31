@@ -144,7 +144,10 @@ class McpConfig(BaseModel):
     transport: str = "stdio"  # stdio (recommended) | sse
     bind: str = "127.0.0.1"  # SSE binds loopback only
     port: int = 8787
-    token_file: str = "~/.config/davpunk/mcp-token"
+    #: None means "next to the rest of the config".  A hardcoded ~/... default
+    #: would ignore XDG_CONFIG_HOME and land the token somewhere other than the
+    #: config.toml it belongs to.
+    token_file: str | None = None
     audit: bool = True
     list_limit: int = 100
     capabilities: McpCapabilities = Field(default_factory=McpCapabilities)
@@ -175,7 +178,9 @@ class McpConfig(BaseModel):
         return min(value, MCP_LIST_LIMIT_CAP)
 
     def token_path(self) -> Path:
-        return Path(self.token_file).expanduser()
+        if self.token_file:
+            return Path(self.token_file).expanduser()
+        return paths.mcp_token_file()
 
 
 class RemoteConfig(BaseModel):
