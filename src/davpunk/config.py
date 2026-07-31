@@ -104,7 +104,11 @@ class KanbanColumn(BaseModel):
 
     id: str
     label: str
-    status: str
+    #: The VTODO STATUS this column stands for.  ``None`` is the column for
+    #: tasks that carry **no** STATUS at all — which is a different thing from
+    #: NEEDS-ACTION, and the distinction between a pool to pick from and work
+    #: that has been picked.  Dropping a card there clears STATUS.
+    status: str | None = None
 
 
 class KanbanConfig(BaseModel):
@@ -112,7 +116,11 @@ class KanbanConfig(BaseModel):
 
     columns: list[KanbanColumn] = Field(
         default_factory=lambda: [
-            KanbanColumn(id="todo", label="To Do", status="NEEDS-ACTION"),
+            # "To Do" is the tasks with no STATUS at all — the pool you pick
+            # from. "Needs Action" is the ones somebody has picked. Collapsing
+            # the two loses exactly the distinction the board exists to show.
+            KanbanColumn(id="todo", label="To Do", status=None),
+            KanbanColumn(id="needsaction", label="Needs Action", status="NEEDS-ACTION"),
             KanbanColumn(id="inprogress", label="In Progress", status="IN-PROCESS"),
             KanbanColumn(id="done", label="Done", status="COMPLETED"),
             KanbanColumn(id="cancelled", label="Cancelled", status="CANCELLED"),

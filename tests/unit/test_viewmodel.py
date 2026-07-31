@@ -159,8 +159,41 @@ def test_an_orphaned_override_falls_through_to_status():
     assert vm.column_of(t, COLUMNS).id == "inprogress"
 
 
-def test_a_task_with_neither_lands_in_the_first_column():
+def test_no_status_and_needs_action_are_different_columns():
+    """A task nobody has looked at yet and one explicitly marked NEEDS-ACTION
+    are a pool to pick from and work that has been picked. Collapsing them
+    loses the distinction the board exists to show."""
     assert vm.column_of(task(), COLUMNS).id == "todo"
+    assert vm.column_of(task(status=Status.NEEDS_ACTION), COLUMNS).id == "needsaction"
+
+
+def test_a_status_with_no_column_of_its_own_is_off_the_board():
+    """Dropping the Done column is how you stop looking at finished work, and
+    it only works if the cards go with it. Piling them into the first column
+    instead would make the board worse, not smaller."""
+    columns = [c for c in COLUMNS if c.id not in {"done", "cancelled"}]
+
+    assert vm.column_of(task(status=Status.COMPLETED), columns) is None
+    assert vm.column_of(task(status=Status.CANCELLED), columns) is None
+    assert vm.column_of(task(status=Status.IN_PROCESS), columns).id == "inprogress"
+
+
+def test_a_hidden_status_is_left_out_of_the_board_entirely():
+    columns = [c for c in COLUMNS if c.id != "done"]
+    tasks = [task("a"), task("b", status=Status.COMPLETED)]
+
+    board = vm.kanban_board(tasks, columns)
+
+    assert [t.uid for t in board["todo"]] == ["a"]
+    assert sum(len(items) for items in board.values()) == 1
+
+
+def test_an_override_still_places_a_card_whose_status_has_no_column():
+    """The override is an explicit choice, and it outranks the status rule."""
+    columns = [c for c in COLUMNS if c.id != "done"]
+    parked = task(status=Status.COMPLETED, kanban_col="inprogress")
+
+    assert vm.column_of(parked, columns).id == "inprogress"
 
 
 def test_two_columns_may_share_a_status_and_the_override_disambiguates():
@@ -174,10 +207,20 @@ def test_two_columns_may_share_a_status_and_the_override_disambiguates():
     )
 
 
+def _column(column_id: str) -> KanbanColumn:
+    return next(c for c in COLUMNS if c.id == column_id)
+
+
 def test_a_drag_writes_both_status_and_the_override():
     """One update_task_optimistic call, both fields."""
-    fields = vm.drop_fields(COLUMNS[1])
+    fields = vm.drop_fields(_column("inprogress"))
     assert fields == {"status": Status.IN_PROCESS, "kanban_col": "inprogress"}
+
+
+def test_a_drag_into_the_no_status_column_clears_the_status():
+    """Dragging back to the pool has to undo having picked the task up."""
+    fields = vm.drop_fields(_column("todo"))
+    assert fields == {"status": None, "kanban_col": "todo"}
 
 
 def test_the_board_has_a_lane_per_column():

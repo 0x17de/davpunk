@@ -154,12 +154,24 @@ def _zone_name(tz: tzinfo) -> str | None:
 # -------------------------------------------------------------------- kanban
 
 
-def column_of(task: Task, columns: list[KanbanColumn]) -> KanbanColumn:
-    """Precedence: explicit override, then STATUS, then the first column.
+def column_of(task: Task, columns: list[KanbanColumn]) -> KanbanColumn | None:
+    """Precedence: explicit override, then STATUS, then nowhere.
 
     An orphaned override — one naming a column that is no longer configured —
     falls through to the STATUS rule and is rewritten on the next drag.  It is
     preserved in the ICS meanwhile.
+
+    **No STATUS is a value here, not a gap.** A task nobody has looked at yet
+    and one explicitly marked NEEDS-ACTION are different things — a pool to
+    pick from, and work that has been picked — so a column may declare
+    ``status = None`` and collect the first.
+
+    ``None`` means "not on this board": the task's status names no configured
+    column.  Dropping the Done and Cancelled columns is how you stop looking
+    at finished work, and it only works if the cards go with them — piling
+    them into the first column instead would make the board *worse*.  Nothing
+    is lost: the list view and search show every task regardless, and the
+    board says how many it is not showing.
     """
     if not columns:
         raise ValueError("at least one kanban column is required")
@@ -170,12 +182,12 @@ def column_of(task: Task, columns: list[KanbanColumn]) -> KanbanColumn:
                 return column
         log.debug("Orphaned kanban override %r on %s", task.kanban_col, task.uid[:8])
 
-    if task.status:
-        for column in columns:
-            if column.status == task.status.value:
-                return column
+    wanted = task.status.value if task.status else None
+    for column in columns:
+        if column.status == wanted:
+            return column
 
-    return columns[0]
+    return None
 
 
 def kanban_board(
@@ -185,15 +197,25 @@ def kanban_board(
 ) -> dict[str, list[Task]]:
     board: dict[str, list[Task]] = {column.id: [] for column in columns}
     for task in apply_filter(tasks, task_filter):
-        board[column_of(task, columns).id].append(task)
+        column = column_of(task, columns)
+        if column is not None:
+            board[column.id].append(task)
     for items in board.values():
         items.sort(key=sort_key)
     return board
 
 
 def drop_fields(column: KanbanColumn) -> dict[str, object]:
-    """A drag sets **both** STATUS and the override, in one update."""
-    return {"status": Status(column.status), "kanban_col": column.id}
+    """A drag sets **both** STATUS and the override, in one update.
+
+    A column standing for "no STATUS" clears the property rather than writing
+    one — dragging a task back to the pool has to be able to undo having
+    picked it up.
+    """
+    return {
+        "status": Status(column.status) if column.status else None,
+        "kanban_col": column.id,
+    }
 
 
 # ------------------------------------------------------------------ filtering

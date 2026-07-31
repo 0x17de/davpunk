@@ -137,6 +137,21 @@ class MainWindow(QMainWindow):
         self._action(edit_menu, "&Move to another list…", self.move_task, "move_task")
         self._action(edit_menu, "&Delete task", self.delete_task, "delete_task")
         edit_menu.addSeparator()
+        # A status submenu is what lets you drop the Done and Cancelled columns
+        # from the board: the states stay reachable without a lane each.
+        # Constructed with a parent rather than through addMenu(str): the
+        # menu returned by addMenu is owned on the Python side, and holding it
+        # only in self.menus is not enough to keep its C++ half alive.
+        status_menu = self.menus["Status"] = QMenu("Change &status", edit_menu)
+        edit_menu.addMenu(status_menu)
+        for label, status in self.STATUS_ENTRIES:
+            self._action(
+                status_menu,
+                label,
+                lambda _checked=False, value=status: self.set_status(value),
+                key=f"Status: {label}",
+            )
+        edit_menu.addSeparator()
         self._action(edit_menu, "Cu&t", self.cut_task, "cut_task")
         self._action(edit_menu, "&Paste", self.paste_task, "paste_task")
         edit_menu.addSeparator()
@@ -175,9 +190,14 @@ class MainWindow(QMainWindow):
         help_menu.addSeparator()
         self._action(help_menu, "&About DavPunk", self.show_about)
 
-    def _action(self, menu, text, handler, keymap_action=None, shortcut=None):
+    def _action(self, menu, text, handler, keymap_action=None, shortcut=None, key=None):
         """Menu entries show the same binding the keymap already defines, so
-        the two can never disagree about what a key does."""
+        the two can never disagree about what a key does.
+
+        ``key`` overrides the ``menu_handlers`` name, for entries whose label
+        is only unambiguous inside their own submenu — "Completed" means one
+        thing under Change status and another next to "Show completed".
+        """
         action = QAction(text, self)
         binding = shortcut or (self.keymap.get(keymap_action) if keymap_action else None)
         if binding:
@@ -188,17 +208,31 @@ class MainWindow(QMainWindow):
             else:
                 action.setShortcut(QKeySequence(binding))
         action.triggered.connect(handler)
-        self.menu_handlers[text.replace("&", "")] = handler
+        self.menu_handlers[key or text.replace("&", "")] = handler
         menu.addAction(action)
         return action
 
-    #: Right-click entries, as ``menu_handlers`` keys.  Naming them by handler
-    #: key rather than by callable is what stops a context entry from quietly
+    #: The status submenu, as ``(label, status)``.  "(no status)" is a real
+    #: choice, not a blank: it is how a task goes back to the pool, and with
+    #: the Done column hidden it is also the only way back out of one.
+    STATUS_ENTRIES = (
+        ("(no status)", None),
+        ("Needs Action", Status.NEEDS_ACTION),
+        ("In Progress", Status.IN_PROCESS),
+        ("Completed", Status.COMPLETED),
+        ("Cancelled", Status.CANCELLED),
+    )
+
+    #: Right-click entries, as ``menu_handlers`` keys — or ``(title, keys)``
+    #: for a submenu, and ``None`` for a separator.  Naming them by handler key
+    #: rather than by callable is what stops a context entry from quietly
     #: drifting away from its Edit-menu counterpart.
     CONTEXT_ENTRIES = (
         "Open task",
         "New task",
         "New subtask",
+        None,
+        ("Change status", tuple(f"Status: {label}" for label, _ in STATUS_ENTRIES)),
         None,
         "Cut",
         "Paste",
@@ -225,14 +259,27 @@ class MainWindow(QMainWindow):
         """The right-click menu, without showing it — which is what makes it
         testable, and what keeps ``_show_context_menu`` down to placement."""
         menu = QMenu(self)
-        for label in self.CONTEXT_ENTRIES:
-            if label is None:
+        for entry in self.CONTEXT_ENTRIES:
+            if entry is None:
                 menu.addSeparator()
-                continue
-            action = menu.addAction(label)
-            action.setEnabled(self._context_enabled(label, task))
-            action.triggered.connect(self.menu_handlers[label])
+            elif isinstance(entry, tuple):
+                title, keys = entry
+                # Parented to `menu`, or its C++ half is collected the moment
+                # this function returns and every entry raises on access.
+                submenu = QMenu(title, menu)
+                menu.addMenu(submenu)
+                submenu.setEnabled(task is not None)
+                for key in keys:
+                    self._context_action(submenu, key, task, text=key.split(": ", 1)[-1])
+            else:
+                self._context_action(menu, entry, task)
         return menu
+
+    def _context_action(self, menu: QMenu, key: str, task: Task | None, text: str | None = None):
+        action = menu.addAction(text or key)
+        action.setEnabled(self._context_enabled(key, task))
+        action.triggered.connect(self.menu_handlers[key])
+        return action
 
     def _context_enabled(self, label: str, task: Task | None) -> bool:
         if label == "New task":
@@ -502,6 +549,24 @@ class MainWindow(QMainWindow):
             return
         self._guarded(lambda: cache.update_task_optimistic(fresh.id, fields, self.conn))
         self.refresh()
+
+    def set_status(self, status: Status | None) -> None:
+        """Set STATUS on the selection, and drop the column override with it.
+
+        An override that outlived the status it was set beside would keep a
+        card in the column it was once dragged to while claiming a status it
+        no longer has, and the next drag would be the only thing to fix it.
+        Choosing a status explicitly is exactly the moment to let go of it.
+        """
+        tasks = self.selected_tasks()
+        if not tasks:
+            return
+        self._guarded(lambda: self._set_status_all(tasks, status))
+        self.refresh()
+
+    def _set_status_all(self, tasks: list[Task], status: Status | None) -> None:
+        for task in tasks:
+            cache.update_task_optimistic(task.id, {"status": status, "kanban_col": None}, self.conn)
 
     def toggle_complete(self) -> None:
         view = self.current_view()

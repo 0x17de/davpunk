@@ -220,7 +220,7 @@ def test_a_kanban_column_nests_children_under_their_parent(window, make_task):
     cache.create_task_local(make_task("c", summary="child", parent_uid="p"), window.conn)
     kanban = _kanban(window)
 
-    column = kanban.lists["todo"]
+    column = kanban.lists["needsaction"]
     assert column.topLevelItemCount() == 1
     assert _find(column, "p").childCount() == 1
     assert _find(column, "c").parent() is _find(column, "p")
@@ -231,14 +231,14 @@ def test_a_folded_parent_says_how_many_it_is_hiding(window, make_task):
     cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
     cache.create_task_local(make_task("g", parent_uid="c"), window.conn)
     kanban = _kanban(window)
-    assert _find(kanban.lists["todo"], "p").text(0) == "parent  (2)"
+    assert _find(kanban.lists["needsaction"], "p").text(0) == "parent  (2)"
 
 
 def test_a_subtree_starts_folded_and_a_bucket_heading_starts_open(window, make_task):
     cache.create_task_local(make_task("p"), window.conn)
     cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
     kanban = _kanban(window)
-    assert not _find(kanban.lists["todo"], "p").isExpanded()
+    assert not _find(kanban.lists["needsaction"], "p").isExpanded()
 
     tree = _list(window)
     assert tree.topLevelItem(0).isExpanded()
@@ -252,13 +252,13 @@ def test_a_fold_survives_a_refresh(window, make_task):
     cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
     kanban = _kanban(window)
 
-    _find(kanban.lists["todo"], "p").setExpanded(True)
+    _find(kanban.lists["needsaction"], "p").setExpanded(True)
     kanban.refresh()
-    assert _find(kanban.lists["todo"], "p").isExpanded()
+    assert _find(kanban.lists["needsaction"], "p").isExpanded()
 
-    _find(kanban.lists["todo"], "p").setExpanded(False)
+    _find(kanban.lists["needsaction"], "p").setExpanded(False)
     kanban.refresh()
-    assert not _find(kanban.lists["todo"], "p").isExpanded()
+    assert not _find(kanban.lists["needsaction"], "p").isExpanded()
 
 
 def test_fold_all_and_unfold_all(window, make_task):
@@ -267,9 +267,9 @@ def test_fold_all_and_unfold_all(window, make_task):
     kanban = _kanban(window)
 
     kanban.set_all_folded(True)
-    assert _find(kanban.lists["todo"], "p").isExpanded()
+    assert _find(kanban.lists["needsaction"], "p").isExpanded()
     kanban.set_all_folded(False)
-    assert not _find(kanban.lists["todo"], "p").isExpanded()
+    assert not _find(kanban.lists["needsaction"], "p").isExpanded()
 
 
 def test_indent_makes_the_selected_task_a_subtask(window, make_task):
@@ -305,8 +305,8 @@ def test_dropping_a_card_onto_another_nests_it_and_moves_it_there(window, make_t
     cache.create_task_local(make_task("p"), window.conn)
     cache.create_task_local(make_task("c"), window.conn)
     kanban = _kanban(window)
-    parent = _find(kanban.lists["todo"], "p")
-    child = _find(kanban.lists["todo"], "c").data(0, _TASK_ROLE())
+    parent = _find(kanban.lists["needsaction"], "p")
+    child = _find(kanban.lists["needsaction"], "c").data(0, _TASK_ROLE())
 
     kanban._on_drop("inprogress", [child], parent.data(0, _TASK_ROLE()))
 
@@ -318,7 +318,7 @@ def test_dropping_a_card_onto_another_nests_it_and_moves_it_there(window, make_t
 def test_dropping_a_card_on_empty_space_only_moves_it(window, make_task):
     cache.create_task_local(make_task("c"), window.conn)
     kanban = _kanban(window)
-    card = _find(kanban.lists["todo"], "c").data(0, _TASK_ROLE())
+    card = _find(kanban.lists["needsaction"], "c").data(0, _TASK_ROLE())
 
     kanban._on_drop("done", [card], None)
 
@@ -334,10 +334,10 @@ def test_a_card_cannot_be_nested_under_one_in_another_calendar(
     cache.create_task_local(make_task("p", calendar_id=other_calendar_id), window.conn)
     cache.create_task_local(make_task("c"), window.conn)
     kanban = _kanban(window)
-    parent = _find(kanban.lists["todo"], "p").data(0, _TASK_ROLE())
-    child = _find(kanban.lists["todo"], "c").data(0, _TASK_ROLE())
+    parent = _find(kanban.lists["needsaction"], "p").data(0, _TASK_ROLE())
+    child = _find(kanban.lists["needsaction"], "c").data(0, _TASK_ROLE())
 
-    kanban._on_drop("todo", [child], parent)
+    kanban._on_drop("needsaction", [child], parent)
 
     assert _reload(window, child).parent_uid is None
 
@@ -524,7 +524,7 @@ def test_a_board_action_survives_focus_leaving_the_column(window, make_task):
     card the user can still see selected is the one they mean."""
     cache.create_task_local(make_task("t"), window.conn)
     kanban = _kanban(window)
-    kanban.select_uid(_find(kanban.lists["todo"], "t").data(0, _TASK_ROLE()))
+    kanban.select_uid(_find(kanban.lists["needsaction"], "t").data(0, _TASK_ROLE()))
 
     assert not any(w.hasFocus() for w in kanban.lists.values())
     assert window.selected_task().uid == "t"
@@ -813,6 +813,96 @@ def _parents(window):
     }
 
 
+# ------------------------------------------------------------ change status
+
+
+def test_the_status_menu_sets_the_status(window, synced_task):
+    task_id = synced_task("t")
+    window.refresh()
+    window.list_view.select_uid("t")
+
+    window.set_status(Status.IN_PROCESS)
+
+    assert cache.get_task_row(task_id, window.conn)["status"] == Status.IN_PROCESS.value
+
+
+def test_the_status_menu_clears_the_status(window, synced_task):
+    """ "(no status)" is a real choice: it is how a task goes back to the pool."""
+    task_id = synced_task("t", status=Status.COMPLETED)
+    window.list_view.toggle_show_completed()
+    window.refresh()
+    window.list_view.select_uid("t")
+
+    window.set_status(None)
+
+    row = cache.get_task_row(task_id, window.conn)
+    assert row["status"] is None
+    assert row["completed"] is None  # no longer completed, so no timestamp
+
+
+def test_setting_a_status_drops_the_column_override(window, synced_task):
+    """An override that outlived the status it was set beside would keep the
+    card in the column it was dragged to while claiming a status it lost."""
+    task_id = synced_task("t")
+    cache.update_task_optimistic(task_id, {"kanban_col": "done"}, window.conn)
+    window.refresh()
+    window.list_view.select_uid("t")
+
+    window.set_status(Status.IN_PROCESS)
+
+    row = cache.get_task_row(task_id, window.conn)
+    assert row["kanban_col"] is None
+    assert row["status"] == Status.IN_PROCESS.value
+
+
+def test_the_status_menu_takes_a_multiple_selection(window, synced_task):
+    ids = [synced_task(uid) for uid in ("a", "b", "c")]
+    tree = _list(window)
+    _select(tree, "a", "c")
+
+    window.set_status(Status.CANCELLED)
+
+    statuses = {
+        row["id"]: row["status"] for row in window.conn.execute("SELECT id, status FROM tasks")
+    }
+    assert statuses[ids[0]] == statuses[ids[2]] == Status.CANCELLED.value
+    assert statuses[ids[1]] == Status.NEEDS_ACTION.value
+
+
+def test_setting_a_status_with_nothing_selected_writes_nothing(window, synced_task):
+    task_id = synced_task("t")
+    window.refresh()
+    window.list_view.tree.clearSelection()
+    window.list_view.tree.setCurrentItem(None)
+
+    window.set_status(Status.CANCELLED)
+
+    assert cache.get_task_row(task_id, window.conn)["sync_state"] == SyncState.CLEAN.value
+
+
+def test_a_column_a_status_has_no_lane_for_is_not_silently_swallowed(
+    qapp, conn, calendar_id, db_path, make_task
+):
+    """Hiding Done hides finished cards — but the board has to say how many."""
+    from davpunk.ui.main_window import MainWindow
+
+    config = DavPunkConfig(default_view="kanban")
+    config.kanban.columns = [c for c in config.kanban.columns if c.id != "done"]
+    cache.create_task_local(make_task("open"), conn)
+    cache.create_task_local(make_task("shut", status=Status.COMPLETED), conn)
+
+    win = MainWindow(config, conn, db_path)
+    try:
+        assert _find(win.kanban_view.lists["needsaction"], "open") is not None
+        assert all(_find(w, "shut") is None for w in win.kanban_view.lists.values())
+        assert (
+            "1 task(s) have a status no column shows" in win.kanban_view.filter_bar.summary.text()
+        )
+    finally:
+        win.sync.stop()
+        win._poll.stop()
+
+
 # ---------------------------------------------------------- column headers
 
 
@@ -825,8 +915,8 @@ def test_a_column_header_is_a_drop_target(window):
 def test_dropping_on_a_column_name_moves_the_card_there(window, make_task):
     cache.create_task_local(make_task("c"), window.conn)
     kanban = _kanban(window)
-    card = _task(kanban.lists["todo"], "c")
-    kanban.lists["todo"].setCurrentItem(_find(kanban.lists["todo"], "c"))
+    card = _task(kanban.lists["needsaction"], "c")
+    kanban.lists["needsaction"].setCurrentItem(_find(kanban.lists["needsaction"], "c"))
 
     kanban.headers["done"].dropped.emit([card])
 
@@ -840,7 +930,7 @@ def test_dropping_several_cards_on_a_column_name_moves_all_of_them(window, make_
     for uid in ("a", "b"):
         cache.create_task_local(make_task(uid), window.conn)
     kanban = _kanban(window)
-    cards = [_task(kanban.lists["todo"], uid) for uid in ("a", "b")]
+    cards = [_task(kanban.lists["needsaction"], uid) for uid in ("a", "b")]
 
     kanban.headers["inprogress"].dropped.emit(cards)
 
@@ -853,7 +943,7 @@ def test_dropping_several_cards_on_a_column_name_moves_all_of_them(window, make_
 def test_a_header_accepts_a_drag_from_a_tree_and_nothing_else(window, make_task):
     cache.create_task_local(make_task("c"), window.conn)
     kanban = _kanban(window)
-    tree = kanban.lists["todo"]
+    tree = kanban.lists["needsaction"]
     tree.setCurrentItem(_find(tree, "c"))
     header = kanban.headers["done"]
 
@@ -878,8 +968,8 @@ def test_dropping_several_cards_onto_one_nests_all_of_them(window, make_task):
     for uid in ("p", "a", "b"):
         cache.create_task_local(make_task(uid), window.conn)
     kanban = _kanban(window)
-    parent = _task(kanban.lists["todo"], "p")
-    cards = [_task(kanban.lists["todo"], uid) for uid in ("a", "b")]
+    parent = _task(kanban.lists["needsaction"], "p")
+    cards = [_task(kanban.lists["needsaction"], uid) for uid in ("a", "b")]
 
     kanban._on_drop("inprogress", cards, parent)
 
@@ -894,7 +984,7 @@ def test_a_read_only_card_is_left_where_it_is(window, make_task):
         make_task("locked", read_only_reason=ReadOnlyReason.OVERSIZE), window.conn
     )
     kanban = _kanban(window)
-    cards = [_task(kanban.lists["todo"], uid) for uid in ("ok", "locked")]
+    cards = [_task(kanban.lists["needsaction"], uid) for uid in ("ok", "locked")]
 
     kanban._on_drop("done", cards, None)
 
@@ -1349,13 +1439,13 @@ def test_a_cut_reaches_a_parent_the_filter_is_hiding(window, make_task):
 
     kanban = _kanban(window)
     kanban._on_filter_changed(vm.TaskFilter(tags=frozenset({"beta"})))
-    assert _find(kanban.lists["todo"], "p") is None  # the parent is not rendered
-    kanban.select_uid(_task(kanban.lists["todo"], "c"))
+    assert _find(kanban.lists["needsaction"], "p") is None  # the parent is not rendered
+    kanban.select_uid(_task(kanban.lists["needsaction"], "c"))
     window.cut_task()
 
     kanban._on_filter_changed(vm.TaskFilter(tags=frozenset({"alpha"})))
-    assert _find(kanban.lists["todo"], "c") is None  # and now the child is not
-    kanban.select_uid(_task(kanban.lists["todo"], "p"))
+    assert _find(kanban.lists["needsaction"], "c") is None  # and now the child is not
+    kanban.select_uid(_task(kanban.lists["needsaction"], "p"))
     window.paste_task()
 
     assert cache.get_task_row(child_id, window.conn)["parent_uid"] == "p"
@@ -1509,15 +1599,44 @@ def test_the_context_menu_offers_the_task_actions(window, make_task):
 
     labels = [a.text() for a in window.context_menu_for(task).actions() if not a.isSeparator()]
 
-    assert labels == [entry for entry in window.CONTEXT_ENTRIES if entry is not None]
+    expected = [
+        entry[0] if isinstance(entry, tuple) else entry
+        for entry in window.CONTEXT_ENTRIES
+        if entry is not None
+    ]
+    assert labels == expected
+
+
+def test_the_context_menu_offers_every_status(window, make_task):
+    """Reachable from a menu, so the Done and Cancelled columns are optional
+    rather than the only way into those states."""
+    cache.create_task_local(make_task("t"), window.conn)
+    tree = _list(window)
+    menu = window.context_menu_for(_task(tree, "t"))
+
+    submenu = next(a.menu() for a in menu.actions() if a.text() == "Change status")
+    assert [a.text() for a in submenu.actions()] == [
+        label for label, _status in window.STATUS_ENTRIES
+    ]
+    assert "(no status)" in [a.text() for a in submenu.actions()]
+
+
+def test_the_status_submenu_is_dead_with_nothing_selected(window):
+    menu = window.context_menu_for(None)
+    entry = next(a for a in menu.actions() if a.text() == "Change status")
+    assert not entry.isEnabled()
 
 
 def test_every_context_entry_shares_the_menu_bars_handler(window, make_task):
     """Naming them by handler key is what stops a right-click entry from
     quietly drifting away from its Edit-menu counterpart."""
     for entry in window.CONTEXT_ENTRIES:
-        if entry is not None:
-            assert entry in window.menu_handlers
+        if entry is None:
+            continue
+        keys = entry[1] if isinstance(entry, tuple) else (entry,)
+        for key in keys:
+            assert key in window.menu_handlers
+            assert callable(window.menu_handlers[key])
 
 
 def test_paste_is_disabled_until_something_is_cut(window, make_task):
@@ -2046,11 +2165,17 @@ def test_preferences_is_reachable_from_the_menu(window):
 def test_every_menu_entry_has_a_handler(window):
     """A menu item that does nothing is worse than no menu item."""
     for name, menu in window.menus.items():
+        # The submenu is registered under its own name and checked in its own
+        # right; the entry that opens it is a menu, not an action.
+        prefix = "Status: " if name == "Status" else ""
         for action in menu.actions():
+            if action.menu() is not None:
+                continue
             label = action.text().replace("&", "").split("\t")[0]
             if label:
-                assert label in window.menu_handlers, f"{name} → {label}"
-                assert callable(window.menu_handlers[label])
+                key = prefix + label
+                assert key in window.menu_handlers, f"{name} → {label}"
+                assert callable(window.menu_handlers[key])
 
 
 def test_menu_shortcuts_match_the_keymap(window):

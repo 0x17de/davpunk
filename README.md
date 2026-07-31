@@ -243,6 +243,32 @@ independent: a parent in "In Progress" whose subtasks are all done shows no
 children there — they are in the Done column, nested under nothing. That is the
 data, not a display bug.
 
+### Columns, and having fewer of them
+
+The default board is **To Do · Needs Action · In Progress · Done · Cancelled**.
+"To Do" is the tasks with no STATUS at all — the pool you pick from — and
+"Needs Action" the ones somebody has picked. They used to share a column, which
+lost exactly the distinction the board is for. Dropping a card back on "To Do"
+clears its status again.
+
+A status with no column of its own is **not shown on the board**. So if Done and
+Cancelled are just bloat for you, delete them from `[davpunk.kanban]` and the
+finished cards go with them:
+
+```toml
+[davpunk.kanban]
+columns = [
+  {id = "todo",        label = "To Do"                                },
+  {id = "needsaction", label = "Needs Action", status = "NEEDS-ACTION"},
+  {id = "inprogress",  label = "In Progress",  status = "IN-PROCESS"  },
+]
+```
+
+Nothing is lost — the list view and search still show everything, and the board
+says how many tasks it is not showing rather than hiding them silently. The
+states stay reachable through **Edit → Change status**, which is also on the
+right-click menu and takes a multiple selection.
+
 ### Filtering the board
 
 The kanban board filters on three axes at once: which **lists** (pick several),

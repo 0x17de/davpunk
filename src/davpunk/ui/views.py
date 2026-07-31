@@ -608,10 +608,20 @@ class KanbanView(QWidget):
     def _update_counts(self, board: dict, shown: int, total: int) -> None:
         for column in self.columns:
             self.headers[column.id].setText(f"<b>{column.label}</b>  ({len(board[column.id])})")
+
         if self.filter.is_active:
             self.filter_bar.summary.setText(
                 f"{self.filter.describe(self._calendar_names())}  —  {shown} of {total}"
             )
+        elif shown < total:
+            # A status with no column of its own is off the board entirely, so
+            # the board has to say so — otherwise dropping the Done column
+            # silently swallows every finished task.
+            self.filter_bar.summary.setText(
+                f"{total - shown} task(s) have a status no column shows"
+            )
+        else:
+            self.filter_bar.summary.setText("")
 
     def _on_filter_changed(self, task_filter) -> None:
         self.filter = task_filter
@@ -657,6 +667,8 @@ class KanbanView(QWidget):
         if task is None:
             return
         current = vm.column_of(task, self.columns)
+        if current is None:
+            return
         index = self.columns.index(current) + delta
         if 0 <= index < len(self.columns):
             self.move_to_column(task, self.columns[index].id)

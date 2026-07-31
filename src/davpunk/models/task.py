@@ -234,7 +234,9 @@ def canonicalize_fields(fields: dict[str, Any]) -> dict[str, Any]:
     if status is Status.COMPLETED:
         out["completed"] = out.get("completed") or utc_now_epoch()
         out["percent_complete"] = 100
-    elif status in (Status.NEEDS_ACTION, Status.IN_PROCESS) or status is Status.CANCELLED:
+    else:
+        # Every other explicitly-set status means not completed — including
+        # clearing it outright, which is how a task goes back to the pool.
         out["completed"] = None
         # percent_complete: PRESERVED (user-confirmed decision)
     return out

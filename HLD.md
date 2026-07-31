@@ -971,6 +971,7 @@ Task       n              new task
            m              move to another list
            Ctrl+X         cut (to reparent by pasting)
            Ctrl+V         paste under the selection
+           (menu)         change status — Edit ▸, or right-click
            e              inline rename
            Tab / S-Tab    indent / outdent (reparent)
            Alt+j / Alt+k  reorder within siblings
@@ -1015,12 +1016,31 @@ a single "reordering N tasks" toast. Sort key is
 
 **Kanban columns.** (1) If `X-DAVPUNK-KANBAN-COL` is set **and** matches a
 configured column `id`, that column wins. (2) Otherwise, the first configured
-column whose `status` equals the task's STATUS. (3) Otherwise, the first column.
-Dragging sets **both** `STATUS` (from the target column) and
-`X-DAVPUNK-KANBAN-COL` (the column `id`) in one `update_task_optimistic` call.
-Column `id`s must be unique; several columns *may* share a `status` — that is
-what the override exists for. An orphaned override falls through to rule 2 and
-is rewritten on the next drag; it is preserved in the ICS meanwhile.
+column whose `status` equals the task's STATUS. (3) Otherwise the task is **not
+on the board at all**. Dragging sets **both** `STATUS` (from the target column)
+and `X-DAVPUNK-KANBAN-COL` (the column `id`) in one `update_task_optimistic`
+call. Column `id`s must be unique; several columns *may* share a `status` — that
+is what the override exists for. An orphaned override falls through to rule 2
+and is rewritten on the next drag; it is preserved in the ICS meanwhile.
+
+**No STATUS is a value, not a gap.** A column may declare `status = null`, and
+it collects the tasks that carry no STATUS at all. A task nobody has looked at
+and one explicitly marked NEEDS-ACTION are different things — a pool to pick
+from, and work that has been picked — and the default columns now name both.
+Dropping a card on the no-status column *clears* STATUS: going back to the pool
+has to be able to undo having picked the task up, which is also why
+`canonicalize_fields` treats an explicitly-cleared status like every other
+non-COMPLETED one and clears the COMPLETED timestamp with it.
+
+**Rule 3 is what makes a column optional.** Removing Done and Cancelled from
+`columns` is how a user stops looking at finished work; piling those cards into
+the first column instead would make the board *worse*, not smaller. Nothing is
+lost — the list view and search show every task regardless of the board's
+configuration — and the board reports the count it is not showing, so a hidden
+column can never swallow work silently. The states stay reachable without a
+lane each through **Edit ▸ Change status**, which also clears
+`X-DAVPUNK-KANBAN-COL`: an override that outlived the status it was set beside
+would hold a card in a column while claiming a status it no longer has.
 
 **Hierarchy in the views.** Both the list and the kanban board render tasks as
 trees. Every view shows a *slice* of the task list — one bucket, one column,
@@ -1289,11 +1309,16 @@ allow_insecure = false                    # required to permit http://
 verify_tls     = true
 
 [davpunk.kanban]
+# status is optional: omitted, the column collects tasks with no STATUS at all.
+# A status with no column here is not shown on the board — that is how you drop
+# Done and Cancelled without losing the states, which stay reachable through
+# Edit → Change status.
 columns = [
-  {id = "todo",       label = "To Do",       status = "NEEDS-ACTION"},
-  {id = "inprogress", label = "In Progress", status = "IN-PROCESS"},
-  {id = "done",       label = "Done",        status = "COMPLETED"},
-  {id = "cancelled",  label = "Cancelled",   status = "CANCELLED"},
+  {id = "todo",        label = "To Do"                                   },
+  {id = "needsaction", label = "Needs Action", status = "NEEDS-ACTION"   },
+  {id = "inprogress",  label = "In Progress",  status = "IN-PROCESS"     },
+  {id = "done",        label = "Done",         status = "COMPLETED"      },
+  {id = "cancelled",   label = "Cancelled",    status = "CANCELLED"      },
 ]
 
 [davpunk.keys]                            # overrides; duplicates are an error
