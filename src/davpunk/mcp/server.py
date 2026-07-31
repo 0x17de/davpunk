@@ -33,9 +33,26 @@ log = logging.getLogger("davpunk.mcp.server")
 TOKEN_BYTES = 32
 
 
-def ensure_token(path: Path) -> str:
-    """Read the bearer token, generating a 0600 one on first enable."""
-    path = Path(path).expanduser()
+class TokenError(Exception):
+    """The bearer token could not be read or written."""
+
+
+def ensure_token(config_or_path) -> str:
+    """Read the bearer token, generating one on first use.
+
+    Accepts an :class:`McpConfig` or a bare path; the path form keeps the
+    plaintext behaviour and exists because that is all the older callers and
+    ``doctor`` need.
+    """
+    config = None if isinstance(config_or_path, (str, Path)) else config_or_path
+    if config is None:
+        return _ensure_plain_token(Path(config_or_path).expanduser())
+    if not config.token_is_encrypted:
+        return _ensure_plain_token(config.token_path())
+    return _ensure_encrypted_token(config)
+
+
+def _ensure_plain_token(path: Path) -> str:
     if path.exists():
         if path.stat().st_mode & 0o077:
             log.warning("MCP token %s is not 0600; fix it with davpunk doctor --fix", path)
@@ -47,6 +64,59 @@ def ensure_token(path: Path) -> str:
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(token + "\n")
     log.info("Generated an MCP bearer token at %s", path)
+    return token
+
+
+def _ensure_encrypted_token(config) -> str:
+    """The token, GnuPG-encrypted at rest and decrypted here.
+
+    Same trade-off as a CalDAV credential: safe if the file is ever backed up
+    or synced somewhere it should not be, and unreadable while gpg-agent is
+    cold — so the failure is reported as such rather than as a bad token.
+    """
+    from davpunk.core import credentials
+
+    path = config.token_path()
+    if path.exists():
+        try:
+            return credentials.decrypt_credential(path).strip()
+        except credentials.CredentialLocked as exc:
+            raise TokenError(
+                f"the MCP token in {path} cannot be decrypted right now — "
+                f"gpg-agent may be cold. {exc}"
+            ) from exc
+        except credentials.CredentialError as exc:
+            raise TokenError(f"the MCP token in {path} could not be read: {exc}") from exc
+
+    token = secrets.token_urlsafe(TOKEN_BYTES)
+    try:
+        credentials.store_credential(token, path, config.token_gpg_key_id)
+    except credentials.CredentialError as exc:
+        raise TokenError(f"could not write the encrypted MCP token: {exc}") from exc
+    log.info("Generated an encrypted MCP bearer token at %s", path)
+    return token
+
+
+def rotate_token(config) -> str:
+    """Replace the token, invalidating whatever a client currently holds."""
+    from davpunk.core import credentials
+
+    for candidate in (config.token_path(), config.plain_token_path()):
+        candidate.unlink(missing_ok=True)
+
+    token = secrets.token_urlsafe(TOKEN_BYTES)
+    if config.token_is_encrypted:
+        try:
+            credentials.store_credential(token, config.token_path(), config.token_gpg_key_id)
+        except credentials.CredentialError as exc:
+            raise TokenError(f"could not write the encrypted MCP token: {exc}") from exc
+    else:
+        path = config.token_path()
+        paths.ensure_dir(path.parent)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(token + "\n")
+    log.info("Rotated the MCP bearer token")
     return token
 
 
@@ -142,6 +212,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="print the SSE bearer token (generating it if needed) and exit",
     )
+    parser.add_argument(
+        "--rotate-token",
+        action="store_true",
+        help="replace the SSE bearer token, print the new one, and exit",
+    )
     return parser
 
 
@@ -158,9 +233,14 @@ def main(argv: list[str] | None = None) -> int:
         log.error("%s", exc)
         return 2
 
-    if args.print_token:
+    if args.print_token or args.rotate_token:
+        try:
+            token = rotate_token(config.mcp) if args.rotate_token else ensure_token(config.mcp)
+        except TokenError as exc:
+            log.error("%s", exc)
+            return 2
         # The one place DavPunk writes to stdout, and it is not a log line.
-        print(ensure_token(config.mcp.token_path()))
+        print(token)
         return 0
 
     if not config.mcp.enabled:
@@ -190,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         if config.mcp.transport == "sse":
-            token = ensure_token(config.mcp.token_path())
+            token = ensure_token(config.mcp)
             log.info(
                 "Serving SSE on %s:%d (bearer token in %s)",
                 config.mcp.bind,
@@ -201,6 +281,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             log.info("Serving over stdio")
             server.run(transport="stdio")
+    except TokenError as exc:
+        log.error("%s", exc)
+        ctx.close()
+        return 2
     except KeyboardInterrupt:
         log.info("Interrupted")
     finally:

@@ -270,7 +270,8 @@ davpunk-mcp --log-level DEBUG     # logs to stderr; stdout is the protocol
 #### SSE
 
 Only if your client cannot speak stdio. It binds `127.0.0.1` and nothing else —
-a non-loopback `bind` is rejected at config load — and requires a bearer token:
+a non-loopback `bind` is rejected at config load — and always requires a bearer
+token:
 
 ```toml
 [davpunk.mcp]
@@ -280,11 +281,36 @@ port      = 8787
 ```
 
 ```sh
-davpunk-mcp --print-token     # generates it 0600 on first use, then prints it
+davpunk-mcp --print-token      # generate (on first use) and print it
+davpunk-mcp --rotate-token     # replace it; old clients stop working
 ```
 
 The client sends it as `Authorization: Bearer <token>`; anything else gets a
-401. The token lives beside `config.toml` unless you set `token_file`.
+401. All of this is also in **Edit → Preferences → AI access**, which can show,
+copy and regenerate the token for you.
+
+##### Encrypting the token at rest
+
+By default the token is a plain file, mode 0600. It can instead be
+GnuPG-encrypted, the same way CalDAV passwords are — pick a key under *Token at
+rest* in Preferences, or set it directly:
+
+```toml
+[davpunk.mcp]
+token_gpg_key_id = "1A2B3C4D5E6F0003!"   # same form as a remote's gpg_key_id
+```
+
+The token then lives in `mcp-token.gpg` and is decrypted when the server
+starts. That protects it if the file is ever backed up or synced somewhere it
+should not be — at the same cost as a CalDAV credential: the server can only
+start while `gpg-agent` still holds the passphrase. A cold agent is reported as
+such rather than as a bad token, and `davpunk doctor` checks it:
+
+```
+PASS mcp-token  …/mcp-token.gpg is readable (encrypted to 1A2B3C4D5E6F0003!)
+```
+
+The token lives beside `config.toml` unless you set `token_file`.
 
 #### Addressing
 

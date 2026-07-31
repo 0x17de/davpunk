@@ -1067,9 +1067,19 @@ priority, calendar` — while `get_task` returns full detail including
 `description` and `raw_ics`. The projection saves more agent context than the
 pagination does.
 
-**Transport hardening.** SSE binds `127.0.0.1` and requires a bearer token from
-`token_file` (0600, generated on first enable). stdio is recommended. With
-`audit = true`, every write/delete call is appended to `mcp_audit` keyed by
+**Transport hardening.** SSE binds `127.0.0.1` — a non-loopback `bind` is
+rejected at config load — and requires a bearer token, generated on first use.
+stdio is recommended and needs no token at all.
+
+The token is a 0600 file by default. Setting `token_gpg_key_id` stores it
+GnuPG-encrypted instead, in `mcp-token.gpg`, decrypted at startup; the
+trade-off is the same as for a CalDAV credential, so a cold `gpg-agent` is
+reported as a token that cannot be *read* rather than as a token that is wrong.
+`--rotate-token` replaces it and clears any leftover plaintext file, so
+switching from a plain to an encrypted token cannot leave the readable one
+behind.
+
+With `audit = true`, every write/delete call is appended to `mcp_audit` keyed by
 `task_ref`.
 
 ---

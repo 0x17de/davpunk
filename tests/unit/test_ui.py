@@ -870,3 +870,143 @@ def test_the_preferences_accelerator_is_actually_bound(window):
     preferences = next(a for a in window.menus["Edit"].actions() if "Preferences" in a.text())
     assert preferences.shortcut().toString() == "Ctrl+,"
     assert "\t" not in preferences.text()
+
+
+# --------------------------------------------------------- MCP transport tab
+
+
+@pytest.fixture
+def sse_config(davpunk_home):
+    from davpunk import paths
+
+    paths.ensure_dir(paths.config_dir())
+    path = paths.config_file()
+    path.write_text(
+        "[davpunk]\ntheme = 'dark'\n\n"
+        "[davpunk.mcp]\nenabled = true\ntransport = 'sse'\nport = 9123\n"
+        "token_gpg_key_id = 'ABCD1234!'\n\n"
+        "[davpunk.mcp.capabilities]\nread = true\n"
+    )
+    path.chmod(0o600)
+    return path
+
+
+def settings_for(path):
+    from davpunk.config import load_config
+    from davpunk.ui.settings import SettingsDialog
+
+    return SettingsDialog(load_config(path), path)
+
+
+def test_the_transport_is_selectable(qapp, sse_config):
+    """Previously only reachable by editing config.toml by hand."""
+    dialog = settings_for(sse_config)
+    assert dialog.transport.currentData() == "sse"
+    assert {dialog.transport.itemData(i) for i in range(dialog.transport.count())} == {
+        "stdio",
+        "sse",
+    }
+
+
+def test_the_port_and_token_are_shown_for_sse(qapp, sse_config):
+    dialog = settings_for(sse_config)
+    assert dialog.port.value() == 9123
+    assert dialog.port.isEnabled()
+    assert dialog.show_token.isEnabled()
+
+
+def test_stdio_disables_the_port_and_token(qapp, sse_config):
+    """They mean nothing without a listening socket, and leaving them live
+    implies stdio needs a token, which it does not."""
+    dialog = settings_for(sse_config)
+    dialog.transport.setCurrentIndex(dialog.transport.findData("stdio"))
+
+    assert not dialog.port.isEnabled()
+    assert not dialog.show_token.isEnabled()
+    assert "no token" in dialog.token_value.placeholderText()
+
+
+def test_the_token_encryption_key_is_selectable(qapp, sse_config):
+    dialog = settings_for(sse_config)
+    assert None in {dialog.token_key.itemData(i) for i in range(dialog.token_key.count())}
+    assert dialog.token_key.currentData() == "ABCD1234!"
+
+
+def test_a_configured_token_key_missing_from_the_keyring_is_kept(qapp, sse_config):
+    """Saving must not silently drop it and re-key the token."""
+    dialog = settings_for(sse_config)
+    assert dialog.token_key.currentData() == "ABCD1234!"
+
+
+def test_the_token_is_not_revealed_until_asked(qapp, sse_config):
+    """Showing it can prompt gpg; opening a settings tab should not."""
+    dialog = settings_for(sse_config)
+    assert dialog.token_value.text() == ""
+    assert "press Show" in dialog.token_value.placeholderText()
+
+
+def test_revealing_a_plain_token_works(qapp, davpunk_home):
+    from davpunk import paths
+
+    paths.ensure_dir(paths.config_dir())
+    path = paths.config_file()
+    path.write_text("[davpunk]\n\n[davpunk.mcp]\nenabled = true\ntransport = 'sse'\n")
+    path.chmod(0o600)
+
+    dialog = settings_for(path)
+    token = dialog._reveal_token()
+    assert token and dialog.token_value.text() == token
+
+
+def test_transport_and_port_are_saved(qapp, sse_config):
+    from davpunk.config import load_config
+    from davpunk.ui.settings import write_settings
+
+    write_settings(
+        sse_config,
+        general={
+            "theme": "dark",
+            "default_view": "list",
+            "show_completed": False,
+            "max_resource_bytes": 262144,
+        },
+        remotes=[],
+        mcp={
+            "enabled": True,
+            "transport": "sse",
+            "port": 9999,
+            "token_gpg_key_id": "BEEF5678!",
+            "capabilities": {"read": True, "write": False, "delete": False, "sync": False},
+        },
+    )
+    mcp = load_config(sse_config).mcp
+    assert (mcp.transport, mcp.port, mcp.token_gpg_key_id) == ("sse", 9999, "BEEF5678!")
+
+
+def test_clearing_the_token_key_removes_it_from_the_config(qapp, sse_config):
+    """Otherwise switching back to a plain token would leave the old key
+    behind and DavPunk would keep looking for mcp-token.gpg."""
+    from davpunk.config import load_config
+    from davpunk.ui.settings import write_settings
+
+    write_settings(
+        sse_config,
+        general={
+            "theme": "dark",
+            "default_view": "list",
+            "show_completed": False,
+            "max_resource_bytes": 262144,
+        },
+        remotes=[],
+        mcp={
+            "enabled": True,
+            "transport": "stdio",
+            "port": 8787,
+            "token_gpg_key_id": None,
+            "capabilities": {"read": True, "write": False, "delete": False, "sync": False},
+        },
+    )
+    mcp = load_config(sse_config).mcp
+    assert mcp.token_gpg_key_id is None
+    assert not mcp.token_is_encrypted
+    assert "token_gpg_key_id" not in sse_config.read_text()

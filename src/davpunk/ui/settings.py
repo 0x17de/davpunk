@@ -235,6 +235,79 @@ class SettingsDialog(QDialog):
         mcp = self.config.mcp
         self.mcp_enabled = QCheckBox("Run the MCP server")
         self.mcp_enabled.setChecked(mcp.enabled)
+        mcp_help = (
+            "Lets an AI assistant work with your tasks through the Model Context "
+            "Protocol. Off by default, and every permission below is off by "
+            "default too."
+        )
+        form.addRow(help_label("MCP server", mcp_help), apply_help(self.mcp_enabled, mcp_help))
+
+        self.transport = QComboBox()
+        self.transport.addItem("stdio — the client launches DavPunk (recommended)", "stdio")
+        self.transport.addItem("SSE — DavPunk listens on localhost", "sse")
+        index = self.transport.findData(mcp.transport)
+        self.transport.setCurrentIndex(max(0, index))
+        self.transport.currentIndexChanged.connect(self._sync_transport)
+        transport_help = (
+            "stdio is simplest and needs no token: the client starts davpunk-mcp "
+            "itself and talks to it over a pipe. Choose SSE only if your client "
+            "cannot do that — it listens on a port, so it needs a bearer token."
+        )
+        form.addRow(
+            help_label("Transport", transport_help), apply_help(self.transport, transport_help)
+        )
+
+        self.port = QSpinBox()
+        self.port.setRange(1024, 65535)
+        self.port.setValue(mcp.port)
+        port_help = (
+            "The port the SSE server listens on. It always binds 127.0.0.1 and "
+            "nothing else — DavPunk refuses a non-loopback address at startup."
+        )
+        form.addRow(help_label("Port", port_help), apply_help(self.port, port_help))
+
+        self.token_key = QComboBox()
+        self.token_key.addItem("Plain file, mode 0600", None)
+        for key in credentials.encryption_options():
+            self.token_key.addItem(f"Encrypted to {key.short_id}", key.recipient)
+        if mcp.token_gpg_key_id:
+            at = self.token_key.findData(mcp.token_gpg_key_id)
+            if at < 0:
+                self.token_key.addItem(
+                    f"{mcp.token_gpg_key_id} (not in this keyring)", mcp.token_gpg_key_id
+                )
+                at = self.token_key.count() - 1
+            self.token_key.setCurrentIndex(at)
+        key_help = (
+            "Encrypting the token protects it if the file is ever backed up or "
+            "synced somewhere it should not be. The cost is the same as for a "
+            "CalDAV password: the server can only start while gpg-agent still "
+            "holds the passphrase."
+        )
+        form.addRow(help_label("Token at rest", key_help), apply_help(self.token_key, key_help))
+
+        self.token_value = QLineEdit()
+        self.token_value.setReadOnly(True)
+        self.token_value.setPlaceholderText("(hidden — press Show)")
+        token_row = QHBoxLayout()
+        token_row.addWidget(self.token_value)
+        self.show_token = QPushButton("Show")
+        self.show_token.clicked.connect(self._reveal_token)
+        self.copy_token = QPushButton("Copy")
+        self.copy_token.clicked.connect(self._copy_token)
+        self.regen_token = QPushButton("Regenerate")
+        self.regen_token.clicked.connect(self._regenerate_token)
+        apply_help(
+            self.regen_token,
+            "Replaces the token. Any client still holding the old one stops "
+            "working until you paste in the new one.",
+        )
+        for button in (self.show_token, self.copy_token, self.regen_token):
+            token_row.addWidget(button)
+        container = QWidget()
+        container.setLayout(token_row)
+        token_help = "The bearer token an SSE client sends as `Authorization: Bearer …`."
+        form.addRow(help_label("Token", token_help), container)
 
         self.cap_read = QCheckBox("Read tasks")
         self.cap_write = QCheckBox("Create and change tasks")
@@ -248,13 +321,6 @@ class SettingsDialog(QDialog):
         ):
             box.setChecked(value)
 
-        mcp_help = (
-            "Lets an AI assistant work with your tasks through the Model Context "
-            "Protocol. Off by default, and every permission below is off by "
-            "default too."
-        )
-        form.addRow(help_label("MCP server", mcp_help), apply_help(self.mcp_enabled, mcp_help))
-
         allow_help = (
             "Grant only what you need. Deletion is separate from writing on "
             "purpose: an assistant that tidies your task text does not need to be "
@@ -263,7 +329,78 @@ class SettingsDialog(QDialog):
         form.addRow(help_label("Allow", allow_help), apply_help(self.cap_read, allow_help))
         for box in (self.cap_write, self.cap_delete, self.cap_sync):
             form.addRow("", apply_help(box, allow_help))
+
+        self._sync_transport()
         return page
+
+    # ------------------------------------------------------------------ token
+
+    def _sync_transport(self) -> None:
+        """The port and the token only mean anything for SSE."""
+        sse = self.transport.currentData() == "sse"
+        for widget in (
+            self.port,
+            self.token_key,
+            self.token_value,
+            self.show_token,
+            self.copy_token,
+            self.regen_token,
+        ):
+            widget.setEnabled(sse)
+        if not sse:
+            self.token_value.clear()
+            self.token_value.setPlaceholderText("(stdio needs no token)")
+        else:
+            self.token_value.setPlaceholderText("(hidden — press Show)")
+
+    def _token_config(self):
+        """The MCP config as the dialog currently shows it.
+
+        Reading the token has to follow the *pending* choice, or pressing Show
+        after switching keys would decrypt the wrong file.
+        """
+        return self.config.mcp.model_copy(
+            update={
+                "transport": self.transport.currentData(),
+                "port": self.port.value(),
+                "token_gpg_key_id": self.token_key.currentData(),
+            }
+        )
+
+    def _reveal_token(self) -> str | None:
+        from davpunk.mcp.server import TokenError, ensure_token
+
+        try:
+            token = ensure_token(self._token_config())
+        except TokenError as exc:
+            QMessageBox.warning(self, "Could not read the token", str(exc))
+            return None
+        self.token_value.setText(token)
+        return token
+
+    def _copy_token(self) -> None:
+        from PySide6.QtWidgets import QApplication
+
+        token = self.token_value.text() or self._reveal_token()
+        if token:
+            QApplication.clipboard().setText(token)
+            QMessageBox.information(self, "Copied", "The token is on your clipboard.")
+
+    def _regenerate_token(self) -> None:
+        from davpunk.mcp.server import TokenError, rotate_token
+
+        confirm = QMessageBox.question(
+            self,
+            "Regenerate the token",
+            "Any client still using the old token will stop working until you "
+            "give it the new one. Continue?",
+        )
+        if confirm != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            self.token_value.setText(rotate_token(self._token_config()))
+        except TokenError as exc:
+            QMessageBox.warning(self, "Could not regenerate the token", str(exc))
 
     # -------------------------------------------------------------- remotes
 
@@ -332,6 +469,9 @@ class SettingsDialog(QDialog):
                 remotes=self.remotes,
                 mcp={
                     "enabled": self.mcp_enabled.isChecked(),
+                    "transport": self.transport.currentData(),
+                    "port": self.port.value(),
+                    "token_gpg_key_id": self.token_key.currentData(),
                     "capabilities": {
                         "read": self.cap_read.isChecked(),
                         "write": self.cap_write.isChecked(),
@@ -382,13 +522,25 @@ def write_settings(config_path, *, general: dict, remotes: list[dict], mcp: dict
     if mcp_table is None:
         mcp_table = tomlkit.table(True)
         davpunk["mcp"] = mcp_table
-    mcp_table["enabled"] = mcp["enabled"]
+    # Only what the caller actually supplied: a key left out keeps whatever the
+    # file already says, which is the same promise tomlkit is here for.
+    for key in ("enabled", "transport", "port"):
+        if key in mcp:
+            mcp_table[key] = mcp[key]
+
+    if "token_gpg_key_id" in mcp:
+        if mcp["token_gpg_key_id"]:
+            mcp_table["token_gpg_key_id"] = mcp["token_gpg_key_id"]
+        elif "token_gpg_key_id" in mcp_table:
+            # Switching back to a plain token has to remove it, or DavPunk
+            # keeps looking for mcp-token.gpg.
+            del mcp_table["token_gpg_key_id"]
 
     capabilities = mcp_table.get("capabilities")
     if capabilities is None:
         capabilities = tomlkit.table()
         mcp_table["capabilities"] = capabilities
-    for key, value in mcp["capabilities"].items():
+    for key, value in mcp.get("capabilities", {}).items():
         capabilities[key] = value
 
     array = tomlkit.aot()

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from davpunk.config import MCP_LIST_LIMIT_CAP, DavPunkConfig, McpCapabilities, McpConfig
@@ -708,3 +710,120 @@ def test_an_explicit_token_file_is_still_honoured(davpunk_home, tmp_path):
 
 def test_a_tilde_in_the_token_path_is_expanded():
     assert not str(McpConfig(token_file="~/x.token").token_path()).startswith("~")
+
+
+# ----------------------------------------------------- the token at rest
+
+
+def test_a_plain_token_is_a_0600_file(davpunk_home):
+    from davpunk.mcp.server import ensure_token
+
+    config = McpConfig()
+    token = ensure_token(config)
+    assert config.token_path().name == "mcp-token"
+    assert config.token_path().stat().st_mode & 0o077 == 0
+    assert ensure_token(config) == token  # stable across restarts
+
+
+def test_an_encrypted_token_lives_beside_it_with_a_gpg_suffix():
+    config = McpConfig(token_gpg_key_id="ABCD1234!")
+    assert config.token_is_encrypted
+    assert config.token_path().name == "mcp-token.gpg"
+    assert config.plain_token_path().name == "mcp-token"
+
+
+def test_an_encrypted_token_round_trips(davpunk_home, monkeypatch):
+    """Same treatment as a CalDAV password: written through gpg, read back at
+    startup."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from davpunk.mcp.server import ensure_token
+
+    store: dict[str, bytes] = {}
+
+    def fake_gpg(argv, **kwargs):
+        if "--encrypt" in argv:
+            out = argv[argv.index("-o") + 1]
+            store["plaintext"] = kwargs["input"]
+            Path(out).write_bytes(b"-----BEGIN PGP MESSAGE-----")
+            return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+        if "--decrypt" in argv:
+            return SimpleNamespace(returncode=0, stdout=store["plaintext"], stderr=b"")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_gpg)
+
+    config = McpConfig(token_gpg_key_id="ABCD1234!")
+    token = ensure_token(config)
+
+    assert config.token_path().exists()
+    assert not config.plain_token_path().exists()  # never written in the clear
+    assert token.encode() == store["plaintext"]
+    assert ensure_token(config) == token
+
+
+def test_a_cold_agent_is_reported_as_such_not_as_a_bad_token(davpunk_home, monkeypatch):
+    """Otherwise the SSE server starts with a token nobody can produce and
+    every client just gets 401."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from davpunk.mcp.server import TokenError, ensure_token
+
+    config = McpConfig(token_gpg_key_id="ABCD1234!")
+    config.token_path().parent.mkdir(parents=True, exist_ok=True)
+    config.token_path().write_bytes(b"ciphertext")
+
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *_a, **_k: SimpleNamespace(
+            returncode=2, stdout=b"", stderr=b"gpg: decryption failed: No secret key"
+        ),
+    )
+    with pytest.raises(TokenError, match="gpg-agent may be cold"):
+        ensure_token(config)
+
+
+def test_rotating_replaces_the_token(davpunk_home):
+    from davpunk.mcp.server import ensure_token, rotate_token
+
+    config = McpConfig()
+    first = ensure_token(config)
+    second = rotate_token(config)
+
+    assert first != second
+    assert ensure_token(config) == second
+
+
+def test_rotating_clears_a_leftover_plaintext_file(davpunk_home, monkeypatch):
+    """Switching to an encrypted token must not leave the old readable one."""
+    import subprocess
+    from types import SimpleNamespace
+
+    from davpunk.mcp.server import ensure_token, rotate_token
+
+    plain = McpConfig()
+    ensure_token(plain)
+    assert plain.token_path().exists()
+
+    def fake_gpg(argv, **_kwargs):
+        if "--encrypt" in argv:
+            Path(argv[argv.index("-o") + 1]).write_bytes(b"pgp")
+        return SimpleNamespace(returncode=0, stdout=b"", stderr=b"")
+
+    monkeypatch.setattr(subprocess, "run", fake_gpg)
+    encrypted = McpConfig(token_gpg_key_id="ABCD1234!")
+    rotate_token(encrypted)
+
+    assert encrypted.token_path().exists()
+    assert not encrypted.plain_token_path().exists()
+
+
+def test_a_path_argument_still_works(davpunk_home):
+    """doctor and older callers pass a bare path."""
+    from davpunk import paths
+    from davpunk.mcp.server import ensure_token
+
+    assert ensure_token(paths.mcp_token_file())

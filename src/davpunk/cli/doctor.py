@@ -121,6 +121,8 @@ def _file_mode_checks(config: DavPunkConfig, config_path: Path | None) -> Iterat
     token = config.mcp.token_path()
     if config.mcp.enabled and token.exists():
         yield _mode_check("mcp-token-mode", token, 0o600)
+    if config.mcp.enabled and config.mcp.transport == "sse":
+        yield _mcp_token_check(config)
 
 
 def _key_check(remote, keys, unusable) -> Check:
@@ -180,6 +182,28 @@ def _group_primaries(keys, subkey):
         elif key is subkey and primary is not None:
             return [primary]
     return []
+
+
+def _mcp_token_check(config: DavPunkConfig) -> Check:
+    """Can the SSE bearer token actually be produced on this machine?
+
+    An encrypted token that will not decrypt is invisible until a client tries
+    to connect and gets a 401 it cannot explain.
+    """
+    from davpunk.mcp.server import TokenError, ensure_token
+
+    path = config.mcp.token_path()
+    if not path.exists():
+        return Check("mcp-token", Status.WARN, f"{path} does not exist yet; it is made on demand")
+    try:
+        ensure_token(config.mcp)
+    except TokenError as exc:
+        return Check("mcp-token", Status.FAIL, str(exc))
+    except Exception as exc:  # a bad token must not abort the whole report
+        return Check("mcp-token", Status.FAIL, f"{path}: {exc}")
+
+    how = f"encrypted to {config.mcp.token_gpg_key_id}" if config.mcp.token_is_encrypted else "0600"
+    return Check("mcp-token", Status.PASS, f"{path} is readable ({how})")
 
 
 def _mode_check(name: str, path: Path, want: int) -> Check:

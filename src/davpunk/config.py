@@ -148,6 +148,11 @@ class McpConfig(BaseModel):
     #: would ignore XDG_CONFIG_HOME and land the token somewhere other than the
     #: config.toml it belongs to.
     token_file: str | None = None
+    #: When set, the bearer token is stored GnuPG-encrypted to this key rather
+    #: than as a 0600 plaintext file, and decrypted at startup — the same
+    #: treatment CalDAV passwords get.  The cost is the same too: the server
+    #: can only start while gpg-agent still holds the passphrase.
+    token_gpg_key_id: str | None = None
     audit: bool = True
     list_limit: int = 100
     capabilities: McpCapabilities = Field(default_factory=McpCapabilities)
@@ -177,7 +182,16 @@ class McpConfig(BaseModel):
             raise ValueError("list_limit must be >= 1")
         return min(value, MCP_LIST_LIMIT_CAP)
 
+    @property
+    def token_is_encrypted(self) -> bool:
+        return bool(self.token_gpg_key_id)
+
     def token_path(self) -> Path:
+        """Where the token actually lives, encrypted or not."""
+        base = self.plain_token_path()
+        return base.with_name(base.name + ".gpg") if self.token_is_encrypted else base
+
+    def plain_token_path(self) -> Path:
         if self.token_file:
             return Path(self.token_file).expanduser()
         return paths.mcp_token_file()
