@@ -297,8 +297,18 @@ class MainWindow(QMainWindow):
         self.context_menu_for(self.selected_task()).exec(widget.viewport().mapToGlobal(point))
 
     def _toggle_completed(self) -> None:
-        self.list_view.toggle_show_completed()
-        self.show_completed_action.setChecked(self.list_view.show_completed)
+        """One view state, honoured by every view that hides anything.
+
+        It used to reach the list view only, so on the board — where the Done
+        and Cancelled columns keep showing finished work — the entry looked
+        broken.  Search is deliberately not included: a search is an explicit
+        question, and "I know I finished it, where is it" is one of the
+        questions it exists to answer.
+        """
+        wanted = not self.list_view.show_completed
+        for view in (self.list_view, self.kanban_view):
+            view.set_show_completed(wanted)
+        self.show_completed_action.setChecked(wanted)
 
     def show_settings(self) -> None:
         from davpunk.ui.settings import SettingsDialog
@@ -474,6 +484,24 @@ class MainWindow(QMainWindow):
             return
         self._create_task(parent_uid=selected.uid, calendar_id=selected.calendar_id)
 
+    def _proposed_status(self, selected: Task | None) -> Status | None:
+        """Which status a new task opens with, on the board.
+
+        A subtask added from a card should land where you asked for it, and on
+        the board "where" *is* a status: opening the editor on NEEDS-ACTION
+        when you right-clicked a card in "To Do" puts the new task in a column
+        you were not looking at.  Proposed, not imposed — the editor still
+        shows it, and every other view leaves it unset.
+        """
+        if selected is None or not isinstance(self.current_view(), KanbanView):
+            return None
+        column = vm.column_of(selected, self.kanban_view.columns)
+        if column is None:
+            # Off the board entirely: the only honest proposal left is the
+            # status the selection itself carries.
+            return selected.status
+        return Status(column.status) if column.status else None
+
     def _create_task(self, *, parent_uid=None, calendar_id=None) -> None:
         calendars = [r for r in cache.calendar_rows(self.conn) if r["available"]]
         if not calendars:
@@ -491,7 +519,12 @@ class MainWindow(QMainWindow):
             start_in = calendars[0]["id"]
 
         tasks = vm.load_tasks(self.conn)
-        task = Task(uid=uuid.uuid4().hex, calendar_id=start_in, parent_uid=parent_uid)
+        task = Task(
+            uid=uuid.uuid4().hex,
+            calendar_id=start_in,
+            parent_uid=parent_uid,
+            status=self._proposed_status(selected),
+        )
         editor = TaskEditor(task, self, calendars=calendars, tasks=tasks, creating=True)
         if editor.exec() != TaskEditor.DialogCode.Accepted:
             return

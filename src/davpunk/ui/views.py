@@ -12,8 +12,10 @@ import logging
 import time
 
 from PySide6.QtCore import Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QHBoxLayout,
     QHeaderView,
     QLabel,
@@ -51,9 +53,36 @@ def fold_key(task: Task) -> tuple:
     return (task.calendar_id, task.uid)
 
 
+def context_item(task: Task) -> QTreeWidgetItem:
+    """An ancestor this view is not showing, drawn as grey scaffolding.
+
+    It carries no ``TASK_ROLE`` and none of the interaction flags on purpose:
+    selecting, dragging or ticking it would act on a task that is not one of
+    the rows here, and every handler in this module decides what it is looking
+    at by asking a row for its task.  A row with no task is already refused
+    everywhere — a bucket heading is the same shape.
+    """
+    item = QTreeWidgetItem([task.summary or "(no summary)"])
+    # Its own fold key: closing the real row in the column it lives in has
+    # nothing to do with closing the grey stand-in over here.
+    item.setData(0, FOLD_ROLE, ("context", task.calendar_id, task.uid))
+    item.setFlags(Qt.ItemFlag.ItemIsEnabled)
+    item.setToolTip(0, "Shown for context — this task itself is not among these rows.")
+
+    grey = QApplication.palette().brush(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText)
+    item.setForeground(0, QBrush(grey))
+    font = item.font(0)
+    font.setItalic(True)
+    item.setFont(0, font)
+    return item
+
+
 def task_item(node: vm.TreeNode) -> QTreeWidgetItem:
     """The first column of a task row: markers, and what a fold would hide."""
     task = node.task
+    if node.is_context:
+        return context_item(task)
+
     label = task.summary or "(no summary)"
     if node.children:
         # Without this a folded parent looks like a leaf, and the only way to
@@ -219,15 +248,18 @@ class ListView(QWidget):
 
     def _node_item(self, node: vm.TreeNode) -> QTreeWidgetItem:
         item = task_item(node)
-        item.setText(1, vm.relative_due(node.task))
-        item.setText(2, node.task.priority_band or "")
-        item.setText(3, ", ".join(node.task.categories))
-        item.setCheckState(
-            0,
-            Qt.CheckState.Checked
-            if node.task.status is Status.COMPLETED
-            else Qt.CheckState.Unchecked,
-        )
+        # A context row is scaffolding: repeating its due date and tags would
+        # give a row you cannot act on the weight of one you can.
+        if not node.is_context:
+            item.setText(1, vm.relative_due(node.task))
+            item.setText(2, node.task.priority_band or "")
+            item.setText(3, ", ".join(node.task.categories))
+            item.setCheckState(
+                0,
+                Qt.CheckState.Checked
+                if node.task.status is Status.COMPLETED
+                else Qt.CheckState.Unchecked,
+            )
         for child in node.children:
             item.addChild(self._node_item(child))
         return item
@@ -272,9 +304,12 @@ class ListView(QWidget):
 
     # --------------------------------------------------------------- actions
 
-    def toggle_show_completed(self) -> None:
-        self.show_completed = not self.show_completed
+    def set_show_completed(self, show: bool) -> None:
+        self.show_completed = show
         self.refresh()
+
+    def toggle_show_completed(self) -> None:
+        self.set_show_completed(not self.show_completed)
 
     def toggle_complete(self) -> None:
         task = self.selected_task()
@@ -415,11 +450,43 @@ class _DropTree(QTreeWidget):
 
 
 class _ColumnTree(_DropTree):
-    """One kanban column, as a tree."""
+    """One kanban column, as a tree.
+
+    ``startDrag`` blocks for the whole drag, which is what makes it the one
+    place that knows a drag is *in progress* — the board uses it to light up
+    the headers, which are otherwise drop targets nothing on screen mentions.
+    """
+
+    dragStarted = Signal()
+    dragEnded = Signal()
 
     def __init__(self, parent=None) -> None:
         super().__init__(parent)
         self.setHeaderHidden(True)
+
+    def startDrag(self, actions) -> None:
+        self.dragStarted.emit()
+        try:
+            super().startDrag(actions)
+        finally:
+            # In a finally, or a drag cancelled with Escape — or one that
+            # throws inside a drop handler — leaves the board lit up forever.
+            self.dragEnded.emit()
+
+
+#: The header's three states.  A transparent border in the resting one, so
+#: arming it cannot shift the row by a pixel.
+_HEADER_STYLES = {
+    "rest": "border: 1px solid transparent; border-radius: 4px; padding: 3px;",
+    "armed": (
+        "border: 1px dashed palette(highlight); border-radius: 4px; padding: 3px;"
+        "background: palette(alternate-base);"
+    ),
+    "hover": (
+        "border: 1px solid palette(highlight); border-radius: 4px; padding: 3px;"
+        "background: palette(highlight); color: palette(highlighted-text);"
+    ),
+}
 
 
 class _ColumnHeader(QLabel):
@@ -429,6 +496,10 @@ class _ColumnHeader(QLabel):
     under the last card — which in a full column is not on screen at all.  A
     header drop is only ever the column move: there is no card under it to
     nest into.
+
+    That target is invisible until you have already found it, so a drag arms
+    every header and the one under the cursor fills in.  A drop target nobody
+    can see is a feature only its author uses.
     """
 
     #: ``(dragged tasks,)`` — the column is implied by which header it is.
@@ -437,17 +508,29 @@ class _ColumnHeader(QLabel):
     def __init__(self, text: str, parent=None) -> None:
         super().__init__(text, parent)
         self.setAcceptDrops(True)
+        self.set_drop_state("rest")
+
+    def set_drop_state(self, state: str) -> None:
+        self.drop_state = state
+        self.setStyleSheet(_HEADER_STYLES[state])
 
     def dragEnterEvent(self, event) -> None:
         # Without accepting the enter and every move, Qt never delivers the
         # drop at all — the cursor just shows "no".
         if dragged_tasks(event.source()):
+            self.set_drop_state("hover")
             event.acceptProposedAction()
         else:
             event.ignore()
 
     def dragMoveEvent(self, event) -> None:
         self.dragEnterEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:
+        # Back to armed, not to rest: the drag is still running, and this is
+        # still somewhere it could land.
+        self.set_drop_state("armed")
+        super().dragLeaveEvent(event)
 
     def dropEvent(self, event) -> None:
         tasks = dragged_tasks(event.source())
@@ -469,6 +552,10 @@ class KanbanView(QWidget):
         self.config = config
         self.columns = config.kanban.columns
         self.filter = vm.TaskFilter()
+        # The same runtime view state the list view has, for the same reason:
+        # a board with the Done column configured shows finished work until
+        # you say otherwise.
+        self.show_completed = config.show_completed
 
         outer = QVBoxLayout(self)
         self.filter_bar = FilterBar()
@@ -482,7 +569,7 @@ class KanbanView(QWidget):
         self.folds = vm.FoldState()
         self._building = False
         self.lists: dict[str, _ColumnTree] = {}
-        self.headers: dict[str, QLabel] = {}
+        self.headers: dict[str, _ColumnHeader] = {}
         for column in self.columns:
             box = QVBoxLayout()
             header = _ColumnHeader(f"<b>{column.label}</b>")
@@ -494,6 +581,8 @@ class KanbanView(QWidget):
             self.headers[column.id] = header
             box.addWidget(header)
             widget = _ColumnTree()
+            widget.dragStarted.connect(self._arm_headers)
+            widget.dragEnded.connect(self._disarm_headers)
             widget.itemActivated.connect(self._activated)
             widget.itemExpanded.connect(lambda item: self._remember(item, True))
             widget.itemCollapsed.connect(lambda item: self._remember(item, False))
@@ -508,6 +597,14 @@ class KanbanView(QWidget):
             self.lists[column.id] = widget
             layout.addLayout(box)
 
+    def _arm_headers(self) -> None:
+        for header in self.headers.values():
+            header.set_drop_state("armed")
+
+    def _disarm_headers(self) -> None:
+        for header in self.headers.values():
+            header.set_drop_state("rest")
+
     def refresh(self) -> None:
         tasks = vm.load_tasks(self.conn)
         # Offer only what the data actually contains, so the picker can never
@@ -515,7 +612,8 @@ class KanbanView(QWidget):
         self.filter_bar.set_calendars(self._calendar_names())
         self.filter_bar.set_tags(vm.available_tags(tasks))
 
-        board = vm.kanban_board(tasks, self.columns, self.filter)
+        visible = tasks if self.show_completed else [t for t in tasks if not vm.is_finished(t)]
+        board = vm.kanban_board(visible, self.columns, self.filter)
         selected = self.selected_task()
         shown = 0
         self._building = True
@@ -523,8 +621,8 @@ class KanbanView(QWidget):
             for column_id, widget in self.lists.items():
                 widget.clear()
                 # A column is a slice, so the tree builder gets the whole set:
-                # a card whose parent sits in another column is a root here,
-                # not a task whose parent is missing.
+                # a card whose parent sits in another column arrives with that
+                # parent as a grey context row, not as a root of its own.
                 for node in vm.build_tree(board[column_id], tasks):
                     widget.addTopLevelItem(self._node_item(node))
                 apply_folds(widget, self.folds)
@@ -533,7 +631,17 @@ class KanbanView(QWidget):
             self._building = False
         if selected is not None:
             self.select_uid(selected)
-        self._update_counts(board, shown, len(tasks))
+        stranded = sum(
+            1 for t in vm.apply_filter(tasks, self.filter) if vm.column_of(t, self.columns) is None
+        )
+        self._update_counts(board, shown, len(visible), stranded)
+
+    def set_show_completed(self, show: bool) -> None:
+        self.show_completed = show
+        self.refresh()
+
+    def toggle_show_completed(self) -> None:
+        self.set_show_completed(not self.show_completed)
 
     def _node_item(self, node: vm.TreeNode) -> QTreeWidgetItem:
         item = task_item(node)
@@ -605,7 +713,7 @@ class KanbanView(QWidget):
             if row["available"]
         }
 
-    def _update_counts(self, board: dict, shown: int, total: int) -> None:
+    def _update_counts(self, board: dict, shown: int, total: int, stranded: int) -> None:
         for column in self.columns:
             self.headers[column.id].setText(f"<b>{column.label}</b>  ({len(board[column.id])})")
 
@@ -613,13 +721,13 @@ class KanbanView(QWidget):
             self.filter_bar.summary.setText(
                 f"{self.filter.describe(self._calendar_names())}  —  {shown} of {total}"
             )
-        elif shown < total:
+        elif stranded:
             # A status with no column of its own is off the board entirely, so
             # the board has to say so — otherwise dropping the Done column
-            # silently swallows every finished task.
-            self.filter_bar.summary.setText(
-                f"{total - shown} task(s) have a status no column shows"
-            )
+            # silently swallows every finished task.  Counted on its own rather
+            # than as "everything not on screen": what "show completed" hides
+            # is hidden on purpose, and does not need reporting back.
+            self.filter_bar.summary.setText(f"{stranded} task(s) have a status no column shows")
         else:
             self.filter_bar.summary.setText("")
 

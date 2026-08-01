@@ -1045,10 +1045,23 @@ would hold a card in a column while claiming a status it no longer has.
 **Hierarchy in the views.** Both the list and the kanban board render tasks as
 trees. Every view shows a *slice* of the task list — one bucket, one column,
 one filter — so the tree builder is given the whole set alongside the slice: a
-child whose parent landed in a different slice is a root here, not a task whose
-parent is missing, and only the latter earns the "linked parent elsewhere"
-marker. In kanban that follows from the model rather than being a special case:
-a column is a status, nesting is `RELATED-TO`, and the two are orthogonal.
+child whose parent landed in a different slice is not a task whose parent is
+missing, and only the latter earns the "linked parent elsewhere" marker. In
+kanban that follows from the model rather than being a special case: a column
+is a status, nesting is `RELATED-TO`, and the two are orthogonal.
+
+A parent the slice does not contain comes along as a **context node**: a grey,
+italic ancestor row with the real subtask under it. A subtask drawn at the root
+of a column reads as a root task, and the one thing that would explain it —
+what it hangs under — is exactly what the slice threw away. The chain walks up
+until it reaches an ancestor the slice already shows (so a parent here and a
+grandparent elsewhere nest the way they look) or runs out of resolvable
+parents, and it ends at a cycle rather than dropping the rows that hang off it.
+Context rows carry no task and none of the interaction flags: they are not
+selectable, draggable or tickable, because acting on one would act on a task
+this view is not showing — the same shape as a bucket heading, which every
+handler already refuses. They fold under their own key, so closing the real row
+in the column it lives in has nothing to do with the grey stand-in.
 
 **Folding.** Fold state is remembered per `(calendar_id, uid)` across refreshes
 — a rebuild happens every poll, and an unremembered fold re-opens itself. Two
@@ -1080,6 +1093,19 @@ goes through `reparent_fields` as well, not straight to the column. Its
 is a PUT to the new collection and a DELETE from the old one, which is
 `move_task_local` and its subtree question, not a column write.
 
+Its **Status** picker offers **"(no status)"** as the first entry, and it is a
+real value rather than a blank: a task nobody has picked up and one explicitly
+marked NEEDS-ACTION are different things — the distinction the "To Do" column
+exists to draw — so the editor has to be able to say both, and to put a task
+back into the pool without going through the status submenu.
+
+A task created **on the board** opens with the status of the column its
+selection sits in. On the board "where" *is* a status, so opening a new subtask
+on NEEDS-ACTION when the user right-clicked a card in "To Do" would file it in
+a column they were not looking at. It is a proposal, not an imposition — the
+picker still shows it — and off the board there is no column to read, so
+nothing is proposed and the field stays unset.
+
 **What a drag carries.** The whole selection, sorted by `sort_key`, so a drag
 is as fast as the multi-select delete, cut and move beside it. Grabbing a row
 *outside* the selection carries only that row: Qt normally reselects on press,
@@ -1104,6 +1130,16 @@ drop target in its own right — aiming at the word "Done" is a much bigger
 target than the empty space under the last card, which in a full column is not
 on screen at all — and it accepts the drag enter *and* every drag move, or Qt
 never delivers the drop.
+
+That target is invisible until you have already found it, so **a drag arms
+every header**: `_ColumnTree.startDrag` blocks for the whole drag, which makes
+it the one place that knows one is in progress, and it brackets the base call
+with `dragStarted` / `dragEnded` — the second in a `finally`, or a drag
+cancelled with Escape leaves the board lit up for the rest of the session. The
+armed state is a dashed outline on every header; the one under the cursor fills
+in on drag-enter and drops back to *armed*, not to rest, on drag-leave. The
+resting state carries a transparent border of the same width, so arming cannot
+shift the row by a pixel.
 
 **List-view drops.** `plan_list_drop` decides them, Qt-free: a drop **onto** a
 row delegates to `reparent_fields`; a drop **above** or **below** one takes
@@ -1149,6 +1185,19 @@ still means "has at least one tag" and stays an active filter. Only tags
 actually in use are offered, so the picker cannot offer a dead one. The filter
 applies before columns are assigned, and each column header shows the count it
 is currently displaying.
+
+**Show completed.** `config.show_completed` is the startup value of one runtime
+toggle held by the window and honoured by *both* board views — **View ▸ Show
+completed** hides COMPLETED and CANCELLED tasks from the list view's buckets
+and from the board's columns alike. It reached the list view alone at first,
+which made the entry look broken on a board configured with a Done column.
+Search is deliberately excluded: a search is an explicit question, and "I know
+I finished it, where is it" is one of the questions it exists to answer.
+
+The board's "*N* task(s) have a status no column shows" line counts only tasks
+whose status names no configured column, not everything absent from the screen.
+What the toggle hides is hidden on purpose and does not need reporting back;
+what a missing column swallows does.
 
 ### 14.6a Forgetting a remote
 

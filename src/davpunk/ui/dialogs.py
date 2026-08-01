@@ -35,7 +35,13 @@ from davpunk.ui.viewmodel import checklist_progress, descendants
 
 log = logging.getLogger("davpunk.ui.dialogs")
 
-STATUSES = [s.value for s in Status]
+#: The editor's status choices.  "(no status)" is first and is a real value,
+#: not a blank: a task nobody has picked up yet and one explicitly marked
+#: NEEDS-ACTION are different things — that is the whole reason the board has a
+#: "To Do" column beside "Needs Action" — and the editor has to be able to say
+#: both, and to put a task back into the pool.
+NO_STATUS = "(no status)"
+STATUSES = [NO_STATUS, *(s.value for s in Status)]
 
 
 class TaskEditor(QDialog):
@@ -77,8 +83,7 @@ class TaskEditor(QDialog):
         self.description = QPlainTextEdit(task.description or "")
         self.status = QComboBox()
         self.status.addItems(STATUSES)
-        if task.status:
-            self.status.setCurrentText(task.status.value)
+        self.status.setCurrentText(task.status.value if task.status else NO_STATUS)
         self.priority = QSpinBox()
         self.priority.setRange(0, 9)
         self.priority.setSpecialValueText("(undefined)")  # 0 means undefined
@@ -188,6 +193,11 @@ class TaskEditor(QDialog):
         self.parent_task.setCurrentIndex(max(index, 0))
         self.parent_task.blockSignals(False)
 
+    def status_value(self) -> Status | None:
+        """The chosen status, with ``None`` for the pool."""
+        text = self.status.currentText()
+        return Status(text) if text != NO_STATUS else None
+
     def calendar_id(self) -> str | None:
         """Which list the task belongs to — the picker's, or the task's own."""
         if self.calendar is None:
@@ -201,10 +211,8 @@ class TaskEditor(QDialog):
             fields["summary"] = self.summary.text() or None
         if self.description.toPlainText() != (self._original.description or ""):
             fields["description"] = self.description.toPlainText() or None
-        if self.status.currentText() != (
-            self._original.status.value if self._original.status else ""
-        ):
-            fields["status"] = Status(self.status.currentText())
+        if self.status_value() != self._original.status:
+            fields["status"] = self.status_value()
         if self.priority.value() != (self._original.priority or 0):
             fields["priority"] = self.priority.value() or None
         if self.percent.value() != (self._original.percent_complete or 0):

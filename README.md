@@ -200,12 +200,16 @@ being torn out of it.
 
 On the board you can also drop straight onto a column's **name**. "Done" is a
 far bigger target than the empty space under the last card, which in a full
-column is not even on screen. A header drop is only ever the column move;
-there is no card under it to nest into.
+column is not even on screen. Every column name outlines itself the moment you
+start dragging, and fills in when you are over it, so you can see where a drop
+would land; a header drop is only ever the column move, since there is no card
+under it to nest into.
 
 **n** starts a new task and **Shift+N** a new subtask of the selection; the
 editor's **List** and **Parent** pickers decide where it lands. Right-clicking
-any task offers the same actions.
+any task offers the same actions. Started from the board, the editor opens on
+the status of the column you were in — right-click a card in "To Do" and the
+new subtask is a "To Do" too, unless you change it before saving.
 
 ### Moving a task when a filter is in the way
 
@@ -239,9 +243,13 @@ hiding, so `kaufen  (262)` tells you what you are about to open. **z R** unfolds
 everything, **z M** folds it all back, both also under **View**.
 
 On the board a column is a *status* and nesting is a *relation*, so the two are
-independent: a parent in "In Progress" whose subtasks are all done shows no
-children there — they are in the Done column, nested under nothing. That is the
-data, not a display bug.
+independent: a parent in "In Progress" can have its subtasks scattered across
+every other column. Where a subtask lands without its parent, the parent comes
+along **greyed out** above it — you can see what the task hangs under without
+that row pretending to be a card in this column. Grey rows are scaffolding:
+they cannot be selected, dragged or ticked, because the task they name is
+somewhere else. The same happens in the list view when a subtask is due today
+and its parent next week.
 
 ### Columns, and having fewer of them
 
@@ -267,7 +275,17 @@ columns = [
 Nothing is lost — the list view and search still show everything, and the board
 says how many tasks it is not showing rather than hiding them silently. The
 states stay reachable through **Edit → Change status**, which is also on the
-right-click menu and takes a multiple selection.
+right-click menu and takes a multiple selection, and through the task editor's
+**Status** field — which offers **(no status)** as a real choice, since that is
+what puts a task back in the "To Do" pool.
+
+### Finished work
+
+Completed and cancelled tasks are hidden by default, in the list *and* on the
+board. **View → Show completed** brings them back for as long as you leave it
+ticked; it is not saved, so it starts from `show_completed` in the config every
+time. Search ignores it — finding something you know you finished is one of the
+things search is for.
 
 ### Filtering the board
 

@@ -11,6 +11,7 @@ perfectly normal place to run the rest of the suite.
 
 from __future__ import annotations
 
+import contextlib
 import os
 
 import pytest
@@ -224,6 +225,54 @@ def test_a_kanban_column_nests_children_under_their_parent(window, make_task):
     assert column.topLevelItemCount() == 1
     assert _find(column, "p").childCount() == 1
     assert _find(column, "c").parent() is _find(column, "p")
+
+
+def test_a_parent_in_another_column_comes_along_greyed_out(window, make_task):
+    """A subtask at the root of a column reads as a root task, and the one
+    thing that would explain it is what the column threw away."""
+    cache.create_task_local(make_task("p", summary="parent", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", summary="child", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    column = kanban.lists["needsaction"]
+    assert column.topLevelItemCount() == 1
+    context = column.topLevelItem(0)
+    assert context.text(0) == "parent"
+    assert _find(column, "c").parent() is context
+    # Still a card of its own in the column it actually belongs to.
+    assert _find(kanban.lists["inprogress"], "p") is not None
+
+
+def test_a_context_row_is_not_a_row_you_can_act_on(window, make_task):
+    """It carries no task, so every handler already refuses it — the same way
+    a bucket heading is refused."""
+    from davpunk.ui.views import TASK_ROLE
+
+    cache.create_task_local(make_task("p", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    context = kanban.lists["needsaction"].topLevelItem(0)
+    assert context.data(0, TASK_ROLE) is None
+    assert not context.flags() & Qt.ItemFlag.ItemIsSelectable
+    assert not context.flags() & Qt.ItemFlag.ItemIsDragEnabled
+    # Open, or the child it exists to explain would start out hidden.
+    assert context.isExpanded()
+
+
+def test_a_context_row_appears_in_the_list_view_too(window, make_task):
+    """The buckets slice the list the same way the columns slice the board."""
+    cache.create_task_local(make_task("p", summary="parent"), window.conn)
+    cache.create_task_local(make_task("c", summary="child", parent_uid="p"), window.conn)
+    cache.create_task_local(make_task("q", summary="unrelated"), window.conn)
+    with cache.tx(window.conn):
+        window.conn.execute("UPDATE tasks SET due_value = '20200101' WHERE uid = 'c'")
+    tree = _list(window)
+
+    overdue = tree.topLevelItem(0)
+    assert overdue.text(0).startswith("Overdue")
+    assert overdue.child(0).text(0) == "parent"
+    assert _find(tree, "c").parent() is overdue.child(0)
 
 
 def test_a_folded_parent_says_how_many_it_is_hiding(window, make_task):
@@ -956,6 +1005,74 @@ def test_a_header_accepts_a_drag_from_a_tree_and_nothing_else(window, make_task)
     assert from_nowhere.ignored
 
 
+@contextlib.contextmanager
+def _no_real_drag(raises=None):
+    """Stand in for ``QTreeWidget.startDrag``, which blocks on a live mouse
+    grab.  What is under test is the override that brackets it."""
+    from PySide6.QtWidgets import QTreeWidget
+
+    original = QTreeWidget.startDrag
+
+    def _stub(self, actions):
+        if raises is not None:
+            raise raises
+
+    QTreeWidget.startDrag = _stub
+    try:
+        yield
+    finally:
+        QTreeWidget.startDrag = original
+
+
+def test_a_drag_lights_up_every_column_name(window, make_task):
+    """A drop target nobody can see is a feature only its author uses."""
+    cache.create_task_local(make_task("c"), window.conn)
+    kanban = _kanban(window)
+    tree = kanban.lists["needsaction"]
+    assert {h.drop_state for h in kanban.headers.values()} == {"rest"}
+
+    lit = {}
+    # The real startDrag blocks until the mouse comes up; what is under test is
+    # that the override brackets it with the two signals.
+    with _no_real_drag():
+        tree.dragStarted.connect(
+            lambda: lit.update(during={h.drop_state for h in kanban.headers.values()})
+        )
+        tree.startDrag(Qt.DropAction.MoveAction)
+
+    assert lit["during"] == {"armed"}
+    assert {h.drop_state for h in kanban.headers.values()} == {"rest"}
+
+
+def test_a_cancelled_drag_still_puts_the_headers_out(window):
+    """Escape, or a handler that raises: either way the board must not stay
+    lit up for the rest of the session."""
+    kanban = _kanban(window)
+    tree = kanban.lists["needsaction"]
+    with _no_real_drag(raises=RuntimeError("cancelled")), pytest.raises(RuntimeError):
+        tree.startDrag(Qt.DropAction.MoveAction)
+
+    assert {h.drop_state for h in kanban.headers.values()} == {"rest"}
+
+
+def test_the_header_under_the_cursor_fills_in(window, make_task):
+    from PySide6.QtGui import QDragLeaveEvent
+
+    cache.create_task_local(make_task("c"), window.conn)
+    kanban = _kanban(window)
+    tree = kanban.lists["needsaction"]
+    tree.setCurrentItem(_find(tree, "c"))
+    header = kanban.headers["done"]
+
+    header.set_drop_state("armed")
+    header.dragEnterEvent(_FakeDrop(tree, None))
+    assert header.drop_state == "hover"
+
+    header.dragLeaveEvent(QDragLeaveEvent())
+    # Armed, not rest: the drag is still running and this is still a target.
+    assert header.drop_state == "armed"
+
+
 def test_a_header_drop_with_nothing_dragged_is_ignored(window):
     event = _FakeDrop(None, None)
     window.kanban_view.headers["done"].dropEvent(event)
@@ -1096,6 +1213,42 @@ def test_a_new_subtask_starts_under_the_selection(window, make_task, monkeypatch
     assert seen["parent"] == "p"
     row = window.conn.execute("SELECT parent_uid FROM tasks WHERE summary = 'Child'").fetchone()
     assert row["parent_uid"] == "p"
+
+
+def test_a_subtask_added_on_the_board_proposes_its_columns_status(window, make_task, monkeypatch):
+    """On the board, "where" is a status: opening the editor on NEEDS-ACTION
+    would put the new card in a column the user was not looking at."""
+    from davpunk.ui.dialogs import NO_STATUS
+
+    cache.create_task_local(make_task("p", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("pool", status=None), window.conn)
+    kanban = _kanban(window)
+
+    seen = {}
+    _accept_editor(monkeypatch, lambda e: seen.update(status=e.status.currentText()))
+
+    kanban.lists["inprogress"].setCurrentItem(_find(kanban.lists["inprogress"], "p"))
+    window.new_subtask()
+    assert seen["status"] == Status.IN_PROCESS.value
+
+    kanban.lists["todo"].setCurrentItem(_find(kanban.lists["todo"], "pool"))
+    window.new_subtask()
+    assert seen["status"] == NO_STATUS
+
+
+def test_a_subtask_added_in_the_list_view_proposes_nothing(window, make_task, monkeypatch):
+    """Off the board there is no column to read a status from, and inventing
+    one would set a field the user never touched."""
+    from davpunk.ui.dialogs import NO_STATUS
+
+    cache.create_task_local(make_task("p", status=Status.IN_PROCESS), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "p"))
+
+    seen = {}
+    _accept_editor(monkeypatch, lambda e: seen.update(status=e.status.currentText()))
+    window.new_subtask()
+    assert seen["status"] == NO_STATUS
 
 
 def test_a_new_subtask_needs_a_selection(window, monkeypatch):
@@ -1735,6 +1888,27 @@ def test_the_editor_parses_tags(qapp, make_task):
     assert editor.changed_fields()["categories"] == ["work", "urgent", "q3"]
 
 
+def test_the_editor_offers_no_status_at_all(qapp, make_task):
+    """The board splits "To Do" (no STATUS) from "Needs Action", so the editor
+    has to be able to say both — and to put a task back into the pool."""
+    from davpunk.ui.dialogs import NO_STATUS
+
+    pooled = TaskEditor(make_task("t", status=None))
+    assert pooled.status.currentText() == NO_STATUS
+    assert pooled.changed_fields() == {}
+
+    picked = TaskEditor(make_task("t", status=Status.NEEDS_ACTION))
+    assert picked.status.currentText() == Status.NEEDS_ACTION.value
+    picked.status.setCurrentText(NO_STATUS)
+    assert picked.changed_fields() == {"status": None}
+
+
+def test_the_editor_still_writes_a_real_status(qapp, make_task):
+    editor = TaskEditor(make_task("t", status=None))
+    editor.status.setCurrentText(Status.IN_PROCESS.value)
+    assert editor.changed_fields() == {"status": Status.IN_PROCESS}
+
+
 def test_priority_zero_means_undefined_in_the_editor(qapp, make_task):
     """"""
     editor = TaskEditor(make_task("t", priority=3))
@@ -2201,6 +2375,33 @@ def test_show_completed_is_a_checkable_view_entry(window, make_task):
     window.show_completed_action.trigger()
     assert window.show_completed_action.isChecked()
     assert window.list_view.select_uid("done")
+
+
+def test_show_completed_reaches_the_board_as_well(window, make_task):
+    """It used to toggle the list view alone, so on a board with a Done column
+    the entry looked like it did nothing at all."""
+    cache.create_task_local(make_task("done", status=Status.COMPLETED), window.conn)
+    cache.create_task_local(make_task("gone", status=Status.CANCELLED), window.conn)
+    kanban = _kanban(window)
+    assert _find(kanban.lists["done"], "done") is None
+    assert _find(kanban.lists["cancelled"], "gone") is None
+    # And the board does not report them as tasks "no column shows": they are
+    # hidden on purpose, not stranded.
+    assert kanban.filter_bar.summary.text() == ""
+
+    window.show_completed_action.trigger()
+    assert _find(kanban.lists["done"], "done") is not None
+    assert _find(kanban.lists["cancelled"], "gone") is not None
+
+    window.show_completed_action.trigger()
+    assert _find(kanban.lists["done"], "done") is None
+
+
+def test_the_two_views_agree_about_show_completed(window):
+    """One view state, or switching views would silently flip it back."""
+    window.show_completed_action.trigger()
+    assert window.list_view.show_completed
+    assert window.kanban_view.show_completed
 
 
 def test_the_toolbar_also_offers_preferences(window):

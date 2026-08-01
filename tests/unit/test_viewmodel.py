@@ -331,7 +331,67 @@ def test_a_child_whose_parent_is_merely_filtered_out_is_not_marked_elsewhere():
     parent = task("p")
     child = task("c", parent_uid="p")
     [node] = vm.build_tree([child], universe=[parent, child])
-    assert not node.linked_parent_elsewhere
+    assert not vm.flatten([node])[-1].linked_parent_elsewhere
+
+
+def test_a_parent_outside_the_slice_comes_along_as_context():
+    """Otherwise a subtask sits at the root of a column reading like a root
+    task, and what would explain it is exactly what the slice threw away."""
+    parent = task("p")
+    child = task("c", parent_uid="p")
+    [root] = vm.build_tree([child], universe=[parent, child])
+
+    assert (root.task.uid, root.is_context) == ("p", True)
+    assert [(n.task.uid, n.is_context) for n in root.children] == [("c", False)]
+
+
+def test_context_stops_at_the_first_ancestor_the_slice_already_has():
+    """A grandparent in this column and a parent in another nest the way they
+    look: one grey row between two real ones, not a second copy of the top."""
+    tasks = [task("g"), task("p", parent_uid="g"), task("c", parent_uid="p")]
+    [root] = vm.build_tree([tasks[0], tasks[2]], universe=tasks)
+
+    assert (root.task.uid, root.is_context) == ("g", False)
+    [middle] = root.children
+    assert (middle.task.uid, middle.is_context) == ("p", True)
+    assert [n.task.uid for n in middle.children] == ["c"]
+
+
+def test_two_stranded_children_share_one_context_parent():
+    tasks = [task("p"), task("a", parent_uid="p"), task("b", parent_uid="p")]
+    roots = vm.build_tree(tasks[1:], universe=tasks)
+
+    assert len(roots) == 1
+    assert [n.task.uid for n in roots[0].children] == ["a", "b"]
+
+
+def test_a_parent_in_another_calendar_is_a_marker_not_a_context_row():
+    """The two mean different things: "shown elsewhere in this view" and "a
+    link that resolves nowhere at all"."""
+    child = task("c", parent_uid="p")
+    child.calendar_id = "other-calendar"
+    [node] = vm.build_tree([child], universe=[task("p"), child])
+
+    assert node.is_context is False
+    assert node.linked_parent_elsewhere is True
+
+
+def test_a_cycle_above_the_slice_still_renders_its_rows():
+    """A ``RELATED-TO`` loop outside the slice must end the context chain, not
+    take the tasks that hang off it down with it."""
+    a = task("a", parent_uid="b")
+    b = task("b", parent_uid="a")
+    child = task("c", parent_uid="a")
+    flat = vm.flatten(vm.build_tree([child], universe=[a, b, child]))
+
+    assert "c" in {n.task.uid for n in flat}
+    assert len(flat) <= 3  # terminates
+
+
+def test_without_a_universe_nothing_is_pulled_in():
+    """The old single-argument behaviour: the slice is all there is to draw."""
+    [node] = vm.build_tree([task("c", parent_uid="p")])
+    assert node.is_context is False
 
 
 def test_a_child_whose_parent_really_is_absent_is_still_marked():

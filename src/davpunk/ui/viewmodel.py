@@ -54,6 +54,15 @@ BUCKET_ORDER = (
 # ------------------------------------------------------------------ grouping
 
 
+def is_finished(task: Task) -> bool:
+    """What "show completed" hides.
+
+    Cancelled counts: it is finished work too, and a board that hid the one
+    while keeping the other would only ever look like a bug.
+    """
+    return task.status in (Status.COMPLETED, Status.CANCELLED)
+
+
 def bucket_of(task: Task, now: datetime | None = None, tz: tzinfo | None = None) -> Bucket:
     """Which list-view group a task belongs in.
 
@@ -65,7 +74,7 @@ def bucket_of(task: Task, now: datetime | None = None, tz: tzinfo | None = None)
     tz = tz or local_timezone()
     now = now or datetime.now(tz)
 
-    if task.status in (Status.COMPLETED, Status.CANCELLED):
+    if is_finished(task):
         return Bucket.COMPLETED
 
     deadline = due_deadline(task, tz)
@@ -298,6 +307,10 @@ class TreeNode:
     #: A RELATED-TO pointing outside this calendar; rendered at root with a
     #: marker and preserved in the ICS.
     linked_parent_elsewhere: bool = False
+    #: Not one of the tasks this view is showing: an ancestor pulled in from
+    #: the universe so its subtasks are not stranded at the root.  Rendered
+    #: grey and inert — it is context, not a row you can act on.
+    is_context: bool = False
 
 
 def build_tree(tasks: list[Task], universe: list[Task] | None = None) -> list[TreeNode]:
@@ -312,28 +325,67 @@ def build_tree(tasks: list[Task], universe: list[Task] | None = None) -> list[Tr
     Without it a child whose parent merely landed in a *different* slice looks
     exactly like one whose parent is in another calendar, and wrongly gets the
     "linked parent elsewhere" marker.  With it, that marker means what it says.
+
+    A parent that *is* in the universe but not in this slice comes along as a
+    **context node**: a subtask shown at the root of a column it did not choose
+    reads as a root task, and the one thing that would explain it — who it
+    hangs under — is exactly what the slice threw away.  The chain stops at the
+    first ancestor the slice already shows, so a parent in this column and a
+    grandparent in another nest the way they look.
     """
-    by_uid: dict[tuple[str | None, str], Task] = {
+    in_slice: dict[tuple[str | None, str], Task] = {
         (task.calendar_id, task.uid): task for task in tasks
     }
-    known = (
-        {(task.calendar_id, task.uid) for task in universe} if universe is not None else set(by_uid)
+    known: dict[tuple[str | None, str], Task] = (
+        {(task.calendar_id, task.uid): task for task in universe}
+        if universe is not None
+        else dict(in_slice)
     )
     children: dict[tuple[str | None, str], list[Task]] = {}
     roots: list[Task] = []
     orphans: set[str] = set()
+    context: dict[tuple[str | None, str], Task] = {}
+
+    def pull_in(task: Task) -> None:
+        """Hang ``task`` off its ancestors, adding the ones this slice lacks."""
+        seen: set[tuple[str | None, str]] = set()
+        parent_uid: str | None = task.parent_uid
+        while parent_uid is not None:
+            key = (task.calendar_id, parent_uid)
+            children.setdefault(key, []).append(task)
+            if key in in_slice or key in context:
+                return  # the rest of the chain is already there
+            parent = known[key]
+            context[key] = parent
+
+            above = (parent.calendar_id, parent.parent_uid) if parent.parent_uid else None
+            if above is None or above not in known or above in seen or len(seen) >= DEPTH_CAP:
+                # Nothing further this view can resolve — or a cycle, which
+                # ends here rather than dropping the whole chain on the floor.
+                roots.append(parent)
+                return
+            seen.add(key)
+            task, parent_uid = parent, parent.parent_uid
 
     for task in tasks:
         key = (task.calendar_id, task.parent_uid) if task.parent_uid else None
-        if key is not None and key in by_uid:
+        if key is None:
+            roots.append(task)
+        elif key in in_slice:
             children.setdefault(key, []).append(task)
+        elif key in known:
+            pull_in(task)
         else:
-            if task.parent_uid and (task.calendar_id, task.parent_uid) not in known:
-                orphans.add(task.uid)
+            orphans.add(task.uid)
             roots.append(task)
 
     def walk(task: Task, depth: int, visited: set[str]) -> TreeNode:
-        node = TreeNode(task=task, depth=depth, linked_parent_elsewhere=task.uid in orphans)
+        node = TreeNode(
+            task=task,
+            depth=depth,
+            linked_parent_elsewhere=task.uid in orphans,
+            is_context=(task.calendar_id, task.uid) in context,
+        )
         if depth >= DEPTH_CAP:
             log.warning("Subtask depth cap (%d) reached at %s", DEPTH_CAP, task.uid[:8])
             return node
