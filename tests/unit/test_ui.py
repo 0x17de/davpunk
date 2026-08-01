@@ -202,6 +202,64 @@ def test_a_refresh_does_not_destroy_the_open_menus_actions(window, make_task):
     assert [a.data() for a in before] == [a.data() for a in after]
 
 
+def _click(menu, action):
+    """A release over ``action``, as the widget would see it."""
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    centre = QPointF(menu.actionGeometry(action).center())
+    menu.setActiveAction(action)
+    QApplication.sendEvent(
+        menu,
+        QMouseEvent(
+            QEvent.Type.MouseButtonRelease,
+            centre,
+            menu.mapToGlobal(centre),
+            Qt.MouseButton.LeftButton,
+            Qt.MouseButton.NoButton,
+            Qt.KeyboardModifier.NoModifier,
+        ),
+    )
+
+
+def test_the_menu_stays_open_while_boxes_are_ticked(window, make_task, calendar_id):
+    """Picking three lists must not mean three trips to the button."""
+    cache.create_task_local(make_task("t1"), window.conn)
+    kanban = _kanban(window)
+    button = kanban.filter_bar.calendars
+    button.menu().popup(button.mapToGlobal(button.rect().bottomLeft()))
+
+    first, second = button._checkable_actions()[:2]
+    _click(button.menu(), first)
+    assert first.isChecked()
+    assert button.menu().isVisible()
+
+    _click(button.menu(), second)
+    assert second.isChecked()
+    assert button.menu().isVisible()
+    assert first.isChecked(), "the first tick must survive the second"
+
+    button.menu().close()
+
+
+def test_a_change_while_the_menu_is_open_lands_when_it_closes(qapp, window, make_task):
+    """The menu now stays open for a whole run of ticks, so an update arriving
+    meanwhile cannot wait for whatever refresh happens to come next."""
+    cache.create_task_local(make_task("t1", categories=["home"]), window.conn)
+    kanban = _kanban(window)
+    button = kanban.filter_bar.tags
+    button.menu().popup(button.mapToGlobal(button.rect().bottomLeft()))
+
+    cache.create_task_local(make_task("t2", categories=["shop"]), window.conn)
+    kanban.refresh()
+    # Rebuilding under the user's cursor would destroy the action being ticked.
+    assert list(button._entries) == ["home"]
+
+    button.menu().close()
+    qapp.processEvents()
+    assert list(button._entries) == ["home", "shop"]
+
+
 # ------------------------------------------------------------- hierarchies
 
 

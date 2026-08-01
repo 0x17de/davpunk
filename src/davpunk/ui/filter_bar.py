@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Signal
+from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (
     QHBoxLayout,
     QLabel,
@@ -28,6 +28,39 @@ from davpunk.ui.viewmodel import TaskFilter
 from davpunk.ui.widgets import apply_help
 
 log = logging.getLogger("davpunk.ui.filter_bar")
+
+
+class _StayOpenMenu(QMenu):
+    """A menu that a click does not dismiss.
+
+    Qt closes a menu as soon as an action fires, checkable or not — fine for a
+    command, wrong for a list of boxes: picking three lists would mean three
+    trips to the button.  Every entry here is part of the same choice, so the
+    menu stays put and closes only when the user says so, with Escape or by
+    clicking away.
+    """
+
+    def mouseReleaseEvent(self, event) -> None:
+        action = self.activeAction()
+        if (
+            action is not None
+            and action.isEnabled()
+            and self.actionGeometry(action).contains(event.position().toPoint())
+        ):
+            action.trigger()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def keyPressEvent(self, event) -> None:
+        """Space and Enter tick without leaving, so the keyboard behaves too."""
+        keys = (Qt.Key.Key_Return, Qt.Key.Key_Enter, Qt.Key.Key_Space)
+        action = self.activeAction()
+        if event.key() in keys and action is not None and action.isEnabled():
+            action.trigger()
+            event.accept()
+            return
+        super().keyPressEvent(event)
 
 
 class _CheckMenuButton(QToolButton):
@@ -46,13 +79,14 @@ class _CheckMenuButton(QToolButton):
         # is no restriction.  Tags are not like that: a task may carry none, so
         # "every tag" still excludes the untagged and must stay a filter.
         self._all_means_none = all_means_none
-        self._menu = QMenu(self)
-        # Keep the menu open while several boxes are ticked.
+        self._menu = _StayOpenMenu(self)
         self._menu.setToolTipsVisible(True)
+        self._menu.aboutToHide.connect(self._flush_pending)
         self.setMenu(self._menu)
         self.setPopupMode(QToolButton.ToolButtonPopupMode.InstantPopup)
         self.setText(label)
         self._entries: dict[str, str] = {}
+        self._pending: dict[str, str] | None = None
 
     def set_entries(self, entries: dict[str, str], selected: set[str]) -> None:
         """``{value: label}``, preserving whatever is still selectable.
@@ -60,14 +94,18 @@ class _CheckMenuButton(QToolButton):
         Rebuilding is skipped when nothing changed, and never happens while the
         menu is open: ``QMenu.clear()`` destroys the very ``QAction`` the user
         just ticked, and the refresh that follows a tick would otherwise delete
-        it mid-signal.  A genuine change while the menu is open is picked up by
-        the next refresh, once it has closed.
+        it mid-signal.  Now that the menu stays open across a whole run of
+        ticks, a genuine change arriving meanwhile is held and applied on close
+        rather than waiting for whatever refresh happens to come next.
         """
         if entries == self._entries:
+            self._pending = None
             return
         if self._menu.isVisible():
+            self._pending = dict(entries)
             return
 
+        self._pending = None
         self._entries = dict(entries)
         self._menu.clear()
 
@@ -91,6 +129,28 @@ class _CheckMenuButton(QToolButton):
             action.toggled.connect(self._on_toggled)
 
         self._update_text(self.selected())
+
+    def _flush_pending(self) -> None:
+        """Apply a held update once the menu has closed.
+
+        Deferred by a tick: ``aboutToHide`` runs while the actions are still
+        alive and possibly still emitting, which is exactly when clearing them
+        is unsafe.
+        """
+        if self._pending is None:
+            return
+        QTimer.singleShot(0, self._apply_pending)
+
+    def _apply_pending(self) -> None:
+        pending, self._pending = self._pending, None
+        if pending is None or self._menu.isVisible():
+            return
+        # Keep whatever the user picked that still exists; entries that went
+        # away drop out of the selection with them.
+        before = self.selected()
+        self.set_entries(pending, before & set(pending))
+        if self.selected() != before:
+            self.changed.emit()
 
     def _checkable_actions(self):
         return [a for a in self._menu.actions() if a.isCheckable()]
