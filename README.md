@@ -36,12 +36,26 @@ The flake exposes:
 
 | Output | |
 |---|---|
-| `packages.davpunk` | the full app — UI, MCP and notifications |
+| `packages.davpunk` | the full app — UI, MCP and notifications, plus a launcher entry |
 | `packages.davpunk-headless` | no Qt, no MCP: for a server that only runs the daemon |
 | `apps.default` / `apps.sync` / `apps.mcp` | `davpunk`, `davpunk-sync`, `davpunk-mcp` |
 | `devShells.default` | the test environment, including a real Radicale |
+| `overlays.default` | `pkgs.davpunk` and `pkgs.davpunk-headless` |
 | `nixosModules.default` | `programs.davpunk.*` |
-| `homeManagerModules.default` | `services.davpunk.*` |
+| `homeModules.default` | `services.davpunk.*` (also as `homeManagerModules.default`) |
+
+The one input is `nixpkgs`, so a config with its own pin needs a single line:
+
+```nix
+inputs.davpunk = {
+  url = "github:mh/DavPunk";
+  inputs.nixpkgs.follows = "nixpkgs";
+};
+```
+
+Add `overlays.default` and both modules take their package from your `pkgs` —
+your nixpkgs, your overlays, one evaluation. Without the overlay they still
+work, they just build DavPunk against this flake's own locked nixpkgs instead.
 
 **NixOS**, in your flake:
 
@@ -54,6 +68,7 @@ The flake exposes:
       modules = [
         davpunk.nixosModules.default
         {
+          nixpkgs.overlays = [ davpunk.overlays.default ];
           programs.davpunk.enable = true;
           programs.davpunk.daemon.enable = true;   # optional background sync
         }
@@ -69,11 +84,11 @@ and GnuPG-encrypted credentials are all per-user, and it needs that user's
 `systemctl --user enable --now davpunk-sync`, or you set
 `programs.davpunk.daemon.autoStart = true`.
 
-**Home Manager**:
+**Home Manager**, in a home configuration:
 
 ```nix
 {
-  imports = [ davpunk.homeManagerModules.default ];
+  imports = [ davpunk.homeModules.default ];
 
   services.davpunk = {
     enable = true;
@@ -97,6 +112,46 @@ and GnuPG-encrypted credentials are all per-user, and it needs that user's
 
 Credentials are never part of `settings` — they live in GnuPG-encrypted files
 that the wizard or `gpg --encrypt` writes.
+
+**Home Manager as a NixOS module**, which is how most configs run it — the
+module goes in `sharedModules`, the overlay goes in the system's nixpkgs, and
+`useGlobalPkgs` then hands both to every user:
+
+```nix
+{
+  nixpkgs.overlays = [ davpunk.overlays.default ];
+
+  home-manager.useGlobalPkgs = true;
+  home-manager.sharedModules = [ davpunk.homeModules.default ];
+
+  home-manager.users.you = {
+    services.davpunk = {
+      enable = true;
+      daemon.enable = true;
+      daemon.gpgAgentTtls = true;
+    };
+  };
+}
+```
+
+`sharedModules` only adds the options — every user who does not set
+`services.davpunk.enable` gets nothing installed.
+
+Either module puts DavPunk in your application launcher: the UI build installs
+`de.zeroxseventeen.DavPunk.desktop` and a scalable icon under
+`share/icons/hicolor`. The app sets its Wayland `app_id` to the same
+`de.zeroxseventeen.DavPunk`, so compositor window rules can name it:
+
+```
+windowrulev2 = workspace 4, class:^(de\.zeroxseventeen\.DavPunk)$
+```
+
+`davpunk-headless` ships neither — a daemon-only host has no UI to launch.
+
+Pick **one** of the two modules per user. `programs.davpunk` (NixOS) and
+`services.davpunk` (Home Manager) both install the package and both write a
+`davpunk-sync` user unit, so enabling both gives you two units with the same
+name, and the Home Manager one wins.
 
 ### uv
 

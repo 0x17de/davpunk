@@ -1,0 +1,19 @@
+[Desktop Entry]
+Type=Application
+Name=DavPunk
+GenericName=Task Manager
+Comment=Work it. Sync it. Check it. Done. — a CalDAV VTODO client
+# The Nix build rewrites this to an absolute store path; everywhere else it
+# resolves off PATH.
+Exec=davpunk
+Icon=de.zeroxseventeen.DavPunk
+Terminal=false
+Categories=Office;ProjectManagement;Utility;
+Keywords=todo;task;tasks;caldav;vtodo;calendar;sync;
+# Qt takes the Wayland app_id from QGuiApplication::desktopFileName(), which
+# davpunk.ui.app sets to this file's basename.  Without the match the window
+# comes up with a generic icon and no window rule can name it.
+StartupWMClass=de.zeroxseventeen.DavPunk
+StartupNotify=true
+SingleMainWindow=true
+X-GNOME-UsesNotifications=true

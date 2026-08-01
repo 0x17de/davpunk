@@ -14,23 +14,37 @@
       pkgsFor = system: nixpkgs.legacyPackages.${system};
     in
     {
+      # ------------------------------------------------------------- overlay
+
+      # The overlay exists for the way home-manager is normally wired into a
+      # NixOS config: `home-manager.useGlobalPkgs = true` means home modules
+      # see the *system's* `pkgs`, so that is where DavPunk has to come from —
+      # built against the consumer's nixpkgs and their overlays, not against
+      # this flake's own locked one.  Both modules below prefer `pkgs.davpunk`
+      # when it is there, so adding the overlay is all it takes.
+      overlays.default = final: _prev: {
+        davpunk = final.callPackage ./nix/davpunk.nix { };
+
+        # No Qt, no MCP: for a server that only runs the sync daemon.
+        davpunk-headless = final.callPackage ./nix/davpunk.nix {
+          withUi = false;
+          withMcp = false;
+        };
+      };
+
       # ------------------------------------------------------------ packages
 
       packages = forAllSystems (
         system:
         let
           pkgs = pkgsFor system;
-          davpunk = pkgs.callPackage ./nix/davpunk.nix { };
+          # One definition, two consumers: the overlay applied to our own
+          # nixpkgs *is* the package set, so the two can never drift.
+          davpunkPkgs = self.overlays.default pkgs pkgs;
         in
         {
-          default = davpunk;
-          inherit davpunk;
-
-          # No Qt, no MCP: for a server that only runs the sync daemon.
-          davpunk-headless = davpunk.override {
-            withUi = false;
-            withMcp = false;
-          };
+          default = davpunkPkgs.davpunk;
+          inherit (davpunkPkgs) davpunk davpunk-headless;
         }
       );
 
@@ -137,8 +151,19 @@
 
       # --------------------------------------------------------------- modules
 
-      nixosModules.default = import ./nix/nixos-module.nix self;
-      homeManagerModules.default = import ./nix/home-module.nix self;
+      nixosModules = rec {
+        davpunk = import ./nix/nixos-module.nix self;
+        default = davpunk;
+      };
+
+      homeModules = rec {
+        davpunk = import ./nix/home-module.nix self;
+        default = davpunk;
+      };
+
+      # `homeModules` is the name home-manager settled on; keep the old one
+      # working for anyone who already imported it.
+      homeManagerModules = self.homeModules;
 
       # ------------------------------------------------------------------ apps
 

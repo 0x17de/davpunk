@@ -4,6 +4,7 @@
   gnupg,
   qt6,
   makeWrapper,
+  desktop-file-utils,
   withUi ? true,
   withMcp ? true,
   withNotifications ? true,
@@ -49,11 +50,24 @@ python3Packages.buildPythonApplication {
     ++ lib.optional withMcp mcp
     ++ lib.optional withNotifications jeepney;
 
-  nativeBuildInputs = [ makeWrapper ] ++ lib.optionals withUi [ qt6.wrapQtAppsHook ];
+  nativeBuildInputs = [
+    makeWrapper
+  ]
+  ++ lib.optionals withUi [
+    qt6.wrapQtAppsHook
+    desktop-file-utils
+  ];
 
   # wrapQtAppsHook reads qtPluginPrefix off qtbase; without it in buildInputs
   # it fails the build rather than silently producing an unwrapped binary.
-  buildInputs = lib.optionals withUi [ qt6.qtbase ];
+  #
+  # qtsvg is here for its imageformats plugin: without it QIcon renders an SVG
+  # to nothing, so the scalable app icon loads as a null icon and the window
+  # comes up blank in the switcher.  qtbase alone does not carry SVG support.
+  buildInputs = lib.optionals withUi [
+    qt6.qtbase
+    qt6.qtsvg
+  ];
 
   # Qt's own plugin discovery only happens for binaries wrapQtAppsHook can see;
   # the console scripts are Python, so they are wrapped manually below.
@@ -69,6 +83,24 @@ python3Packages.buildPythonApplication {
     "davpunk.core.sync_engine"
   ]
   ++ lib.optional withMcp "davpunk.mcp.tools";
+
+  # The desktop entry and its icon ship only with the UI build — a headless
+  # daemon host has no business advertising a launcher for a binary it does
+  # not have.  Both come from share/ so the non-Nix install path can use the
+  # same files.
+  postInstall = lib.optionalString withUi ''
+    install -Dm644 share/de.zeroxseventeen.DavPunk.desktop \
+      $out/share/applications/de.zeroxseventeen.DavPunk.desktop
+    install -Dm644 share/de.zeroxseventeen.DavPunk.svg \
+      $out/share/icons/hicolor/scalable/apps/de.zeroxseventeen.DavPunk.svg
+
+    # `Exec=davpunk` only resolves for someone who has it on PATH, which is not
+    # a given for a system-wide install started by a launcher.
+    substituteInPlace $out/share/applications/de.zeroxseventeen.DavPunk.desktop \
+      --replace-fail 'Exec=davpunk' "Exec=$out/bin/davpunk"
+
+    desktop-file-validate $out/share/applications/de.zeroxseventeen.DavPunk.desktop
+  '';
 
   postFixup = ''
     # GnuPG is a runtime binary dependency: DavPunk shells out to it rather

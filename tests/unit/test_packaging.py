@@ -12,6 +12,10 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# The D-Bus name, the .desktop basename, the icon name and the Wayland app_id
+# are all this one string, and the window only gets its icon while they agree.
+APP_ID = "de.zeroxseventeen.DavPunk"
+
 
 @pytest.fixture(scope="module")
 def pyproject() -> dict:
@@ -235,8 +239,16 @@ def test_the_flake_exposes_both_package_variants(flake_text):
 
 
 def test_the_flake_exposes_the_modules(flake_text):
-    assert "nixosModules.default" in flake_text
-    assert "homeManagerModules.default" in flake_text
+    assert "nixosModules" in flake_text
+    assert "homeModules" in flake_text
+    # The name home-manager used before `homeModules`; configs still import it.
+    assert "homeManagerModules" in flake_text
+
+
+def test_the_flake_exposes_an_overlay(flake_text):
+    """`home-manager.useGlobalPkgs` hands home modules the *system's* pkgs, so
+    that is where DavPunk has to be reachable from."""
+    assert "overlays.default" in flake_text
 
 
 def test_the_dev_shell_sets_up_qt(flake_text):
@@ -265,6 +277,66 @@ def test_the_package_wraps_the_ui_for_qt():
     assert "wrapQtAppsHook" in text
     # wrapQtAppsHook reads qtPluginPrefix off qtbase and fails without it.
     assert "qt6.qtbase" in text
+    # qtbase carries no SVG support, and the app icon is an SVG: without the
+    # qtsvg imageformats plugin QIcon renders it to a null icon.
+    assert "qt6.qtsvg" in text
+
+
+# ------------------------------------------------------------- desktop entry
+
+
+@pytest.fixture(scope="module")
+def desktop_entry() -> dict[str, str]:
+    text = (ROOT / "share" / f"{APP_ID}.desktop").read_text()
+    assert text.startswith("[Desktop Entry]\n")
+    return dict(
+        line.split("=", 1) for line in text.splitlines() if "=" in line and not line.startswith("#")
+    )
+
+
+def test_the_desktop_entry_is_named_after_the_bus_name():
+    """Qt takes the Wayland app_id from the .desktop basename, and the entry
+    only ever gets matched to the window if the two agree."""
+    from davpunk.ui.app import BUS_NAME
+
+    assert BUS_NAME == APP_ID
+    assert (ROOT / "share" / f"{APP_ID}.desktop").exists()
+
+
+def test_the_desktop_entry_points_at_the_ui_and_its_icon(desktop_entry):
+    assert desktop_entry["Type"] == "Application"
+    assert desktop_entry["Name"] == "DavPunk"
+    assert desktop_entry["Exec"] == "davpunk"  # the nix build absolutises this
+    assert desktop_entry["Terminal"] == "false"
+    assert desktop_entry["Icon"] == APP_ID
+    # X11 has no app_id; the launcher matches the window by WM_CLASS instead.
+    assert desktop_entry["StartupWMClass"] == APP_ID
+
+
+def test_the_icon_is_scalable_and_self_contained():
+    """A launcher renders it at whatever size it likes, and an icon that
+    referenced anything outside itself would render as a blank."""
+    svg = (ROOT / "share" / f"{APP_ID}.svg").read_text()
+    assert "viewBox" in svg
+    assert "<image" not in svg
+    assert "href" not in svg
+
+
+def test_the_ui_claims_the_desktop_entry():
+    """Without this the window comes up with a generic icon under Wayland."""
+    text = (ROOT / "src" / "davpunk" / "ui" / "app.py").read_text()
+    assert "setDesktopFileName(BUS_NAME)" in text
+    assert "QIcon.fromTheme(BUS_NAME)" in text
+
+
+def test_the_package_installs_the_entry_only_with_the_ui():
+    """A daemon-only host has no UI to launch."""
+    text = (ROOT / "nix" / "davpunk.nix").read_text()
+    assert "postInstall = lib.optionalString withUi" in text
+    assert f"$out/share/applications/{APP_ID}.desktop" in text
+    assert f"$out/share/icons/hicolor/scalable/apps/{APP_ID}.svg" in text
+    # A typo'd entry is invisible rather than broken, so it gets checked.
+    assert "desktop-file-validate" in text
 
 
 @pytest.mark.parametrize("module", ["nixos-module.nix", "home-module.nix"])
@@ -288,4 +360,5 @@ def test_the_readme_documents_the_nix_entry_points():
     readme = (ROOT / "README.md").read_text()
     assert "nix develop" in readme
     assert "nixosModules.default" in readme
-    assert "homeManagerModules.default" in readme
+    assert "homeModules.default" in readme
+    assert "overlays.default" in readme

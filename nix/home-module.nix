@@ -8,7 +8,12 @@ self:
 
 let
   cfg = config.services.davpunk;
-  defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.davpunk;
+
+  # `pkgs.davpunk` when the consumer added `davpunk.overlays.default` — that is
+  # the one built against *their* nixpkgs, which is what you want under
+  # `home-manager.useGlobalPkgs = true`.  Without the overlay this still works,
+  # it just evaluates a second nixpkgs (this flake's locked one) to get there.
+  defaultPackage = pkgs.davpunk or self.packages.${pkgs.stdenv.hostPlatform.system}.davpunk;
 in
 {
   options.services.davpunk = {
@@ -17,7 +22,7 @@ in
     package = lib.mkOption {
       type = lib.types.package;
       default = defaultPackage;
-      defaultText = lib.literalMD "the flake's `davpunk` package";
+      defaultText = lib.literalMD "`pkgs.davpunk`, or the flake's own build of it";
       description = "The DavPunk package to install.";
     };
 

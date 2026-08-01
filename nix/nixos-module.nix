@@ -8,7 +8,11 @@ self:
 
 let
   cfg = config.programs.davpunk;
-  defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.davpunk;
+
+  # `pkgs.davpunk` when the consumer added `davpunk.overlays.default`, so the
+  # package follows their nixpkgs and overlays.  Without it, this flake's own
+  # locked nixpkgs gets evaluated to produce one.
+  defaultPackage = pkgs.davpunk or self.packages.${pkgs.stdenv.hostPlatform.system}.davpunk;
 in
 {
   options.programs.davpunk = {
@@ -17,7 +21,7 @@ in
     package = lib.mkOption {
       type = lib.types.package;
       default = defaultPackage;
-      defaultText = lib.literalMD "the flake's `davpunk` package";
+      defaultText = lib.literalMD "`pkgs.davpunk`, or the flake's own build of it";
       description = "The DavPunk package to install system-wide.";
     };
 

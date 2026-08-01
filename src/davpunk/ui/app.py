@@ -63,11 +63,26 @@ def _raise_existing_window() -> bool:
 
 
 def _run_locked(args, _lock_fd) -> int:
+    from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     app = QApplication(sys.argv)
     app.setApplicationName("DavPunk")
     app.setOrganizationName("DavPunk")
+
+    # Qt derives the Wayland app_id from this, so it has to match the basename
+    # of the installed .desktop file or the window comes up with a generic icon
+    # and no compositor rule can name it.
+    app.setDesktopFileName(BUS_NAME)
+
+    # X11 reads the icon off the window rather than off the desktop entry, so
+    # it needs setting by hand.  No theme carries a DavPunk icon, and Qt falls
+    # through to hicolor by itself on Linux, which is where the package
+    # installs ours.  Null when DavPunk runs from a checkout with nothing
+    # installed — Qt then keeps its own default, which is what we want.
+    icon = QIcon.fromTheme(BUS_NAME)
+    if not icon.isNull():
+        app.setWindowIcon(icon)
 
     config_path = Path(args.config).expanduser() if args.config else paths.config_file()
     config, config_error = _load(config_path)
