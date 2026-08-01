@@ -129,6 +129,78 @@ def dragged_tasks(source) -> list[Task]:
     return sorted(selected, key=vm.sort_key)
 
 
+def _write_orders(orders: dict[str, int], candidates: list[Task], conn) -> None:
+    by_uid = {t.uid: t for t in candidates}
+    for uid, order in orders.items():
+        target = by_uid.get(uid)
+        if target is not None:
+            cache.update_task_optimistic(target.id, {"davpunk_order": order}, conn)
+
+
+def apply_sibling_drop(
+    conn, dragged: list[Task], onto: Task, position, extra: dict[str, object] | None = None
+) -> tuple[int, bool]:
+    """Place ``dragged`` beside ``onto``, at ``onto``'s level.
+
+    Shared by both views, because a drop *between* two rows means the same
+    thing in each: become a sibling of what you landed beside.  On the board
+    that is also the gesture that takes a subtask out of its parent — dropping
+    it on a column can only ever be a status change, so without this there is
+    no drag that unnests a card at all.
+
+    ``extra`` is written with the parent and the order in a single update, so
+    an interrupted drop cannot leave a card nested where its column says it is
+    not.  It is written even for a task the reparent refuses — another
+    calendar, or a drop inside the task's own subtree — because the column move
+    that came with it is still a thing the user asked for, and silently doing
+    nothing is the bug this whole function exists to fix.
+
+    Several dragged tasks land in the order they were in, each just below the
+    one before it.  A refused task does not become the anchor: the next one
+    still aims at the row that was actually dropped on.
+
+    Returns ``(tasks touched, whether a gap had to be rebalanced)``.
+    """
+    tasks = vm.load_tasks(conn)
+    movable = vm.topmost([t for t in dragged if not t.is_read_only], tasks)
+
+    anchor, where, touched, rebalanced = onto, position, 0, False
+    for task in movable:
+        key = (task.calendar_id, task.uid)
+        # The refusals that mean "not here, ever": another calendar, or a drop
+        # that would put the anchor inside the task's own subtree.
+        refused = task.calendar_id != anchor.calendar_id or (
+            anchor.uid != task.uid and anchor.uid in vm.descendants(task, tasks)
+        )
+        siblings = [t for t in tasks if t.calendar_id == task.calendar_id]
+        moved = next((t for t in siblings if t.uid == task.uid), None)
+        plan = None if refused or moved is None else vm.plan_list_drop(task, anchor, where, tasks)
+
+        fields = dict(extra or {})
+        if plan is not None:
+            fields["parent_uid"] = plan.parent_uid
+            fields["davpunk_order"] = plan.orders[task.uid]
+        if fields and moved is not None:
+            cache.update_task_optimistic(moved.id, fields, conn)
+            if plan is not None:
+                _write_orders(
+                    {uid: order for uid, order in plan.orders.items() if uid != task.uid},
+                    siblings,
+                    conn,
+                )
+                touched += plan.touched
+                rebalanced = rebalanced or plan.rebalanced
+            tasks = vm.load_tasks(conn)
+
+        if refused:
+            continue
+        # Moved or already exactly there, the next one goes below it — that is
+        # what keeps a dragged block in the order it was picked up in.
+        anchor = next((t for t in tasks if (t.calendar_id, t.uid) == key), anchor)
+        where = vm.DropPosition.BELOW
+    return touched, rebalanced
+
+
 def _walk(tree: QTreeWidget):
     stack = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
     while stack:
@@ -338,67 +410,18 @@ class ListView(QWidget):
         The buckets are a computed view of DUE, not a settable field, so a
         heading is not a drop target — it reaches here as ``onto is None``,
         which is also what empty space looks like.
-
-        Several dragged tasks land in the order they were in, each just below
-        the one before it, because that is what dropping a block of rows at a
-        point looks like.  Anything an ancestor in the same drag already
-        carries is dropped first: moving it again is what would un-nest it.
         """
         if onto is None:
             return
 
-        tasks = vm.load_tasks(self.conn)
-        movable = vm.topmost([t for t in dragged if not t.is_read_only], tasks)
-
-        anchor, where, touched, rebalanced = onto, position, 0, False
-        for task in movable:
-            # The refusals that mean "not here, ever": another calendar, or a
-            # drop that would put the anchor inside the task's own subtree.
-            # Everything else — including a task already exactly where it is
-            # being dropped — still becomes the anchor for the next one.
-            if task.calendar_id != anchor.calendar_id:
-                continue
-            if anchor.uid != task.uid and anchor.uid in vm.descendants(task, tasks):
-                continue
-
-            plan = vm.plan_list_drop(task, anchor, where, tasks)
-            siblings = [t for t in tasks if t.calendar_id == task.calendar_id]
-            moved = next((t for t in siblings if t.uid == task.uid), None)
-            if plan is not None and moved is not None:
-                # The parent and the order in one call, so an interrupted drop
-                # cannot leave a task nested where its order says it does not
-                # belong.
-                cache.update_task_optimistic(
-                    moved.id,
-                    {"parent_uid": plan.parent_uid, "davpunk_order": plan.orders[task.uid]},
-                    self.conn,
-                )
-                self._write_orders(
-                    {uid: order for uid, order in plan.orders.items() if uid != task.uid}, siblings
-                )
-                touched += plan.touched
-                rebalanced = rebalanced or plan.rebalanced
-                tasks = vm.load_tasks(self.conn)
-
-            # Moved or already there, the next one goes below it — that is what
-            # keeps a dragged block in the order it was picked up in.
-            anchor = next(
-                (t for t in tasks if t.uid == task.uid and t.calendar_id == task.calendar_id),
-                anchor,
-            )
-            where = vm.DropPosition.BELOW
-
+        touched, rebalanced = apply_sibling_drop(self.conn, dragged, onto, position)
         self.refresh()
         message = self._coalesce(touched, rebalanced)
         if message:
             self.toast.emit(message)
 
     def _write_orders(self, orders: dict[str, int], candidates: list[Task]) -> None:
-        by_uid = {t.uid: t for t in candidates}
-        for uid, order in orders.items():
-            target = by_uid.get(uid)
-            if target is not None:
-                cache.update_task_optimistic(target.id, {"davpunk_order": order}, self.conn)
+        _write_orders(orders, candidates, self.conn)
 
     def _coalesce(self, touched: int, rebalanced: bool) -> str | None:
         """Drags inside a 2 s window collapse into a single toast."""
@@ -586,11 +609,11 @@ class KanbanView(QWidget):
             widget.itemActivated.connect(self._activated)
             widget.itemExpanded.connect(lambda item: self._remember(item, True))
             widget.itemCollapsed.connect(lambda item: self._remember(item, False))
-            # Only a drop *onto* a card nests; between two cards the board has
-            # no ordering question to answer, so it is just a column move.
+            # Onto a card nests, between two cards places it beside them: the
+            # position is what says which, so it has to reach the handler.
             widget.dropped.connect(
                 lambda tasks, onto, position, column_id=column.id: self._on_drop(
-                    column_id, tasks, onto if position is vm.DropPosition.ON else None
+                    column_id, tasks, onto, position
                 )
             )
             box.addWidget(widget)
@@ -670,9 +693,22 @@ class KanbanView(QWidget):
                     return True
         return False
 
-    def _on_drop(self, column_id: str, dragged: list[Task], onto: Task | None) -> None:
-        """Onto a card: become its subtasks, in its column.  Onto the column or
+    def _on_drop(
+        self,
+        column_id: str,
+        dragged: list[Task],
+        onto: Task | None,
+        position=vm.DropPosition.ON,
+    ) -> None:
+        """Onto a card: become its subtasks, in its column.  **Between** two
+        cards: become their sibling, in its column.  Onto the column itself or
         its header: just the move.
+
+        The middle case is how a subtask leaves its parent on the board.  A
+        column is a status, so dropping on one cannot say anything about
+        nesting; without a drop that places a card *beside* another there is no
+        drag on the whole board that unnests anything, and a card dragged out
+        of its parent silently snapped back under it.
 
         One update per task carrying both fields, so an interrupted drag
         cannot leave one nested somewhere it is not shown.
@@ -682,6 +718,11 @@ class KanbanView(QWidget):
             return
         movable = [task for task in dragged if not task.is_read_only]
         if not movable:
+            return
+
+        if onto is not None and position is not vm.DropPosition.ON:
+            apply_sibling_drop(self.conn, movable, onto, position, vm.drop_fields(column))
+            self.refresh()
             return
 
         nesting: dict[str, dict[str, object]] = {}

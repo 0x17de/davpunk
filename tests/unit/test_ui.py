@@ -376,6 +376,76 @@ def test_dropping_a_card_on_empty_space_only_moves_it(window, make_task):
     assert moved.status is Status.COMPLETED
 
 
+def test_dropping_a_card_between_two_roots_takes_it_out_of_its_parent(window, make_task):
+    """The board threw the drop *position* away, so a subtask dragged out of
+    its parent snapped straight back under it — and since a column drop can
+    only say something about status, no drag on the board unnested anything."""
+    cache.create_task_local(make_task("backlog", davpunk_order=1000), window.conn)
+    cache.create_task_local(
+        make_task("drucken", parent_uid="backlog", davpunk_order=1000), window.conn
+    )
+    cache.create_task_local(make_task("baumhaus", davpunk_order=2000), window.conn)
+    kanban = _kanban(window)
+    column = kanban.lists["needsaction"]
+
+    kanban._on_drop("needsaction", [_task(column, "drucken")], _task(column, "backlog"), _BELOW)
+
+    moved = _reload(window, _task(column, "drucken"))
+    assert moved.parent_uid is None
+    # And it lands where it was dropped, not at the end of the column.
+    assert 1000 < moved.davpunk_order < 2000
+
+
+def test_a_between_cards_drop_carries_the_column_too(window, make_task):
+    """It is still a drop *in a column*: both fields, one update."""
+    cache.create_task_local(make_task("p", davpunk_order=1000), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p", davpunk_order=1000), window.conn)
+    kanban = _kanban(window)
+
+    kanban._on_drop(
+        "inprogress",
+        [_task(kanban.lists["needsaction"], "c")],
+        _task(kanban.lists["needsaction"], "p"),
+        _ABOVE,
+    )
+
+    moved = _reload(window, _task(kanban.lists["inprogress"], "c"))
+    assert moved.parent_uid is None
+    assert moved.status is Status.IN_PROCESS
+
+
+def test_a_between_cards_drop_beside_a_subtask_joins_it(window, make_task):
+    """Dropped beside a nested card, it becomes that card's sibling — the same
+    thing the gesture means in the list view."""
+    cache.create_task_local(make_task("p"), window.conn)
+    cache.create_task_local(make_task("a", parent_uid="p", davpunk_order=1000), window.conn)
+    cache.create_task_local(make_task("loose", davpunk_order=5000), window.conn)
+    kanban = _kanban(window)
+    column = kanban.lists["needsaction"]
+
+    kanban._on_drop("needsaction", [_task(column, "loose")], _task(column, "a"), _BELOW)
+
+    assert _reload(window, _task(column, "loose")).parent_uid == "p"
+
+
+def test_a_between_cards_drop_across_calendars_still_moves_the_column(
+    window, make_task, other_calendar_id
+):
+    """The nesting is refused — RELATED-TO resolves within one calendar — but
+    the column move came with it and is not refused with it."""
+    cache.create_task_local(make_task("here", calendar_id=other_calendar_id), window.conn)
+    cache.create_task_local(make_task("there"), window.conn)
+    kanban = _kanban(window)
+    column = kanban.lists["needsaction"]
+    dragged = _task(column, "there")
+
+    kanban._on_drop("inprogress", [dragged], _task(column, "here"), _BELOW)
+
+    moved = _reload(window, dragged)
+    assert moved.status is Status.IN_PROCESS
+    assert moved.parent_uid is None
+
+
 def test_a_card_cannot_be_nested_under_one_in_another_calendar(
     window, make_task, other_calendar_id
 ):

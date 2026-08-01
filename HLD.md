@@ -1124,7 +1124,16 @@ block in order — without it the second task lands above the first.
 **Kanban drops.** Onto a card, `plan_paste` decides the nesting for the whole
 dragged set at once, so the descendant-dedup and the cycle refusal are the code
 cut-and-paste uses; a plan that `needs_move` is refused rather than performed,
-because nesting across calendars is a `RELATED-TO` that never resolves. Onto a
+because nesting across calendars is a `RELATED-TO` that never resolves.
+**Between** two cards it is `apply_sibling_drop` — the same function the list
+view uses, because the gesture means the same thing in both: become a sibling
+of the row you landed beside. That is also the only drag on the board that
+*unnests* a card: a column is a status, so dropping on one cannot say anything
+about parentage, and until the position reached the handler a subtask dragged
+out of its parent silently snapped back under it. The column's fields ride
+along in the same update, and are written even for a task whose reparent
+is refused — the column move is still something the user asked for, and
+dropping it on the floor is the bug the shared path exists to fix. Onto a
 column, or onto its **header**, it is only the column move. The header is a
 drop target in its own right — aiming at the word "Done" is a much bigger
 target than the empty space under the last card, which in a full column is not

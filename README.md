@@ -185,6 +185,12 @@ subtask of the one above it, **Shift+Tab** promotes it back out, and on the
 board you can drag a card onto another to do the same — it becomes a subtask
 *and* moves to that card's column.
 
+Dropping a card **between** two others puts it beside them instead of inside
+anything, which is how you take a subtask back out of its parent by dragging:
+drop it between two top-level cards and it becomes top-level too. Dropping it
+on a column, or on the column's name, only ever changes the status — a column
+says nothing about what a task hangs under, so it leaves the nesting alone.
+
 In the list you can drag too: drop a row **onto** another to nest it, or
 **between** two rows to place it there. A drop never changes the status — the
 groups you see are Overdue / Today / Upcoming, which are computed from the due
