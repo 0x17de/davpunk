@@ -26,6 +26,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from davpunk.config import KanbanColumn
 from davpunk.core import cache
 from davpunk.models.task import Status, Task
 from davpunk.ui import viewmodel as vm
@@ -657,6 +658,13 @@ class KanbanView(QWidget):
         # a board with the Done column configured shows finished work until
         # you say otherwise.
         self.show_completed = config.show_completed
+        #: Context rows for subtasks *below* a card in the In Progress column:
+        #: off, because that column is the one you read most often and a parent
+        #: picked up there drags its whole scattered family in behind it.
+        #: Context *ancestors* are not covered — a subtask sitting there with
+        #: nothing above it is unreadable whichever column it is in.  Runtime
+        #: state, like ``show_completed``.
+        self.show_inprogress_context_children = False
 
         outer = QVBoxLayout(self)
         self.filter_bar = FilterBar()
@@ -792,7 +800,11 @@ class KanbanView(QWidget):
                 # A column is a slice, so the tree builder gets the whole set:
                 # a card whose parent sits in another column arrives with that
                 # parent as a grey context row, not as a root of its own.
-                for node in vm.build_tree(board[column_id], tasks, on_board):
+                # Withholding `on_board` is what turns the context children
+                # off: the walk *down* is the only thing that reads it, so the
+                # walk up still brings the parents along.
+                below = None if column_id in self._skip_child_context() else on_board
+                for node in vm.build_tree(board[column_id], tasks, below):
                     widget.addTopLevelItem(self._node_item(node))
                 apply_folds(widget, self.folds)
                 shown += len(board[column_id])
@@ -811,6 +823,27 @@ class KanbanView(QWidget):
 
     def toggle_show_completed(self) -> None:
         self.set_show_completed(not self.show_completed)
+
+    def inprogress_columns(self) -> list[KanbanColumn]:
+        """The configured columns that stand for IN-PROCESS.
+
+        By status, not by id or label: the column is the user's to rename and
+        renumber, and the toggle is about the *state*, not the word.
+        """
+        return [c for c in self.columns if c.status == Status.IN_PROCESS.value]
+
+    def _skip_child_context(self) -> set[str]:
+        """Columns that pull no subtasks down as context this refresh."""
+        if self.show_inprogress_context_children:
+            return set()
+        return {column.id for column in self.inprogress_columns()}
+
+    def set_show_inprogress_context_children(self, show: bool) -> None:
+        self.show_inprogress_context_children = show
+        self.refresh()
+
+    def toggle_show_inprogress_context_children(self) -> None:
+        self.set_show_inprogress_context_children(not self.show_inprogress_context_children)
 
     def _node_item(self, node: vm.TreeNode) -> QTreeWidgetItem:
         item = task_item(node)

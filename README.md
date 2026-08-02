@@ -363,6 +363,12 @@ greyed, instead of leaving a card that looks like it has nothing under it. The
 same happens in the list view when a subtask is due today and its parent next
 week.
 
+In Progress is the exception, because it is the column you read most and a
+parent picked up there brings its whole scattered family in behind it: it pulls
+no subtasks down unless you ask for them under **View → Show subtask context in
+In Progress**. The greyed *parents* are unaffected — a subtask with nothing
+above it is unreadable in any column.
+
 A grey row is a second rendering of a task that really lives elsewhere, so it
 cannot be dragged, ticked or dropped onto — those would be claims about a
 column the task is only visiting. Its right-click menu works normally though:

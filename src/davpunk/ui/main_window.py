@@ -180,6 +180,19 @@ class MainWindow(QMainWindow):
         self.show_completed_action.triggered.connect(self._toggle_completed)
         self.menu_handlers["Show completed"] = self._toggle_completed
         view_menu.addAction(self.show_completed_action)
+        # Named after the configured column rather than after "In Progress":
+        # the label is the user's to change, and a menu entry pointing at a
+        # column name that is not on the board explains nothing.
+        inprogress = self.kanban_view.inprogress_columns()
+        if inprogress:
+            label = f"Show &subtask context in {inprogress[0].label}"
+            self.context_children_action = QAction(label, self, checkable=True)
+            self.context_children_action.setChecked(
+                self.kanban_view.show_inprogress_context_children
+            )
+            self.context_children_action.triggered.connect(self._toggle_context_children)
+            self.menu_handlers[label.replace("&", "")] = self._toggle_context_children
+            view_menu.addAction(self.context_children_action)
         view_menu.addSeparator()
         self._action(view_menu, "&Unfold all", lambda: self.set_all_folded(True), "expand_all")
         self._action(view_menu, "&Fold all", lambda: self.set_all_folded(False), "collapse_all")
@@ -309,6 +322,12 @@ class MainWindow(QMainWindow):
         for view in (self.list_view, self.kanban_view):
             view.set_show_completed(wanted)
         self.show_completed_action.setChecked(wanted)
+
+    def _toggle_context_children(self) -> None:
+        """Board-only, unlike "Show completed": the list view is one slice, so
+        there is no other column for a subtask to have gone to."""
+        self.kanban_view.toggle_show_inprogress_context_children()
+        self.context_children_action.setChecked(self.kanban_view.show_inprogress_context_children)
 
     def show_settings(self) -> None:
         from davpunk.ui.settings import SettingsDialog

@@ -1109,6 +1109,15 @@ this view is not showing — the same shape as a bucket heading, which every
 handler already refuses. They fold under their own key, so closing the real row
 in the column it lives in has nothing to do with the grey stand-in.
 
+The walk *down* is switchable per column, and off by default for the column
+standing for IN-PROCESS — matched by status, not by id or label, since the
+column is the user's to rename. It is the column read most often, and a parent
+picked up there pulls its whole scattered family in behind it. Only the walk
+down: the view withholds `shown` for that column and passes `universe` as
+before, so ancestors still come along. Runtime state like `show_completed`,
+reachable from the View menu as *Show subtask context in <column>*, and it moves
+no counts — a context row was never a card of the column it appears in.
+
 **Folding.** Fold state is remembered per `(calendar_id, uid)` across refreshes
 — a rebuild happens every poll, and an unremembered fold re-opens itself. Two
 sets, not one: "never seen" must stay distinguishable from "the user closed

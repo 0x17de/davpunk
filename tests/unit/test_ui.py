@@ -321,6 +321,49 @@ def test_a_subtask_in_another_column_stays_under_its_parent_greyed_out(window, m
     assert _find(kanban.lists["inprogress"], "lack") is not None
 
 
+def test_in_progress_pulls_no_subtasks_down_as_context_by_default(window, make_task):
+    """The column you read most, kept to the work actually in it: a card picked
+    up there otherwise drags its whole scattered family in behind it."""
+    cache.create_task_local(make_task("p", summary="parent", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", summary="child", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    assert not kanban.show_inprogress_context_children
+    assert _find(kanban.lists["inprogress"], "p").childCount() == 0
+    # Off here only: the subtask is still a card of its own where it belongs.
+    assert _find(kanban.lists["needsaction"], "c") is not None
+
+    kanban.set_show_inprogress_context_children(True)
+    assert _find(kanban.lists["inprogress"], "p").childCount() == 1
+
+
+def test_in_progress_still_pulls_its_ancestors_in(window, make_task):
+    """Downwards only: a subtask sitting at the root of In Progress with
+    nothing above it is exactly as unreadable as in any other column."""
+    cache.create_task_local(make_task("p", summary="parent"), window.conn)
+    cache.create_task_local(
+        make_task("c", summary="child", parent_uid="p", status=Status.IN_PROCESS), window.conn
+    )
+    kanban = _kanban(window)
+
+    column = kanban.lists["inprogress"]
+    assert column.topLevelItem(0).text(0) == "parent"
+    assert _find(column, "c").parent() is column.topLevelItem(0)
+
+
+def test_hiding_the_context_children_does_not_change_the_counts(window, make_task):
+    """A context row was never a card of this column, so neither the header
+    count nor the "no column shows this" tally may move when it goes."""
+    cache.create_task_local(make_task("p", summary="parent", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", summary="child", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+    before = kanban.headers["inprogress"].text(), kanban.filter_bar.summary.text()
+
+    kanban.set_show_inprogress_context_children(True)
+
+    assert (kanban.headers["inprogress"].text(), kanban.filter_bar.summary.text()) == before
+
+
 def test_a_subtask_the_board_is_not_showing_does_not_come_back_as_context(window, make_task):
     """Hiding completed work takes rows away; context must not put them back."""
     cache.create_task_local(make_task("auto", summary="auto"), window.conn)
@@ -2904,6 +2947,27 @@ def test_show_completed_reaches_the_board_as_well(window, make_task):
 
     window.show_completed_action.trigger()
     assert _find(kanban.lists["done"], "done") is None
+
+
+def test_subtask_context_is_a_checkable_view_entry_starting_off(window, make_task):
+    cache.create_task_local(make_task("p", summary="parent", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", summary="child", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+    assert not window.context_children_action.isChecked()
+    assert _find(kanban.lists["inprogress"], "p").childCount() == 0
+
+    window.context_children_action.trigger()
+    assert window.context_children_action.isChecked()
+    assert _find(kanban.lists["inprogress"], "p").childCount() == 1
+
+    window.context_children_action.trigger()
+    assert _find(kanban.lists["inprogress"], "p").childCount() == 0
+
+
+def test_the_context_entry_is_named_after_the_configured_column(window):
+    """Pointing at a column name that is not on the board explains nothing."""
+    label = window.context_children_action.text().replace("&", "")
+    assert label == "Show subtask context in In Progress"
 
 
 def test_the_two_views_agree_about_show_completed(window):
