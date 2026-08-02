@@ -242,6 +242,100 @@ def test_doctor_reports_a_missing_credential(config_file):
     assert checks["credential[work]"].status is Status.FAIL
 
 
+KEYRING_CONFIG = """
+[davpunk]
+theme = "dark"
+
+[[davpunk.remotes]]
+id = "work"
+name = "Work"
+url = "https://cal.example.test/dav/"
+username = "user"
+credential_backend = "keyring"
+"""
+
+
+@pytest.fixture
+def keyring_config(davpunk_home):
+    from davpunk import paths
+
+    paths.ensure_dir(paths.config_dir())
+    path = paths.config_file()
+    path.write_text(KEYRING_CONFIG)
+    path.chmod(0o600)
+    return path
+
+
+def _keyring(monkeypatch, *, present=True, locked=False, stored=True):
+    """Stand in for the Secret Service, so doctor is testable without one."""
+    from davpunk.core import secret_store
+    from davpunk.core.credentials import CredentialError, CredentialLocked
+
+    monkeypatch.setattr(secret_store, "keyring_available", lambda: present)
+
+    def _load(self):
+        if not present:
+            raise CredentialError("no Secret Service is available")
+        if locked:
+            raise CredentialLocked("the login keyring is locked")
+        return "hunter2"
+
+    monkeypatch.setattr(secret_store.KeyringStore, "exists", lambda self: present and stored)
+    monkeypatch.setattr(secret_store.KeyringStore, "load", _load)
+
+
+def test_doctor_does_not_fail_a_gnupg_free_setup(keyring_config, monkeypatch):
+    """Nothing here is encrypted with gpg, so a missing gpg is not a problem
+    the user has — reporting it as one is reporting a solved problem."""
+    from davpunk.core import credentials
+
+    _keyring(monkeypatch)
+    monkeypatch.setattr(credentials, "gpg_available", lambda: False)
+
+    checks = {c.name: c for c in doctor.run_all(keyring_config)}
+
+    assert checks["gpg"].status is Status.PASS
+    assert "not needed" in checks["gpg"].detail
+    # And no credential *file* is looked for either.
+    assert "credential[work]" not in checks
+
+
+def test_doctor_reads_the_keyring_back(keyring_config, monkeypatch):
+    _keyring(monkeypatch)
+    checks = {c.name: c for c in doctor.run_all(keyring_config)}
+    assert checks["keyring[work]"].status is Status.PASS
+
+
+def test_doctor_treats_a_locked_keyring_as_wait_not_broken(keyring_config, monkeypatch):
+    """The same answer a cold gpg-agent gets: the daemon is idle, not broken,
+    and DavPunk will not raise a password prompt to fix it."""
+    _keyring(monkeypatch, locked=True)
+    checks = {c.name: c for c in doctor.run_all(keyring_config)}
+
+    assert checks["keyring[work]"].status is Status.WARN
+    assert "locked" in checks["keyring[work]"].detail
+
+
+def test_doctor_fails_when_nothing_was_ever_stored(keyring_config, monkeypatch):
+    """No amount of waiting produces a secret that is not there."""
+    _keyring(monkeypatch, stored=False)
+    checks = {c.name: c for c in doctor.run_all(keyring_config)}
+    assert checks["keyring[work]"].status is Status.FAIL
+
+
+def test_doctor_says_when_there_is_no_keyring_at_all(keyring_config, monkeypatch):
+    _keyring(monkeypatch, present=False)
+    checks = {c.name: c for c in doctor.run_all(keyring_config)}
+
+    assert checks["keyring"].status is Status.FAIL
+    assert "session bus" in checks["keyring"].detail
+
+
+def test_doctor_says_nothing_about_the_keyring_when_nothing_uses_it(config_file, monkeypatch):
+    checks = {c.name: c for c in doctor.run_all(config_file)}
+    assert not [name for name in checks if name.startswith("keyring")]
+
+
 def test_doctor_warns_rather_than_failing_on_an_absent_daemon(config_file):
     checks = {c.name: c for c in doctor.run_all(config_file)}
     systemd = checks.get("systemd-unit") or checks.get("systemd")

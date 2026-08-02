@@ -28,7 +28,7 @@ from PySide6.QtWidgets import (
 )
 
 from davpunk import paths
-from davpunk.core import credentials
+from davpunk.core import credentials, secret_store
 from davpunk.ui.remote_form import RemoteForm
 
 log = logging.getLogger("davpunk.ui.first_run")
@@ -36,6 +36,38 @@ log = logging.getLogger("davpunk.ui.first_run")
 
 def needs_first_run(config, error: Exception | None = None) -> bool:
     return error is not None or not config.remotes
+
+
+def store_password(parent, values: dict, password: str) -> bool:
+    """Put one password wherever the form said to, and explain any refusal.
+
+    Shared by the wizard and Preferences so the two cannot disagree about what
+    a backend needs — the wizard's "you have no GPG key" message used to be the
+    only place that knew.
+    """
+    backend = values.get("credential_backend")
+    if backend is None:
+        QMessageBox.critical(
+            parent,
+            "Nowhere to put it",
+            "Choose where to keep the password first — GnuPG or the login keyring.",
+        )
+        return False
+
+    store = secret_store.for_remote_backend(
+        backend,
+        values["id"],
+        name=values.get("name"),
+        username=values.get("username"),
+        key_id=values.get("gpg_key_id"),
+        gpg_file=values.get("gpg_file"),
+    )
+    try:
+        store.store(password)
+    except credentials.CredentialError as exc:
+        QMessageBox.critical(parent, "Could not save the password", str(exc))
+        return False
+    return True
 
 
 class ConfigErrorDialog(QMessageBox):
@@ -132,7 +164,11 @@ class FirstRunWizard(QWizard):
         super().accept()
 
     def _store_credential(self, values: dict) -> bool:
-        """Qt password dialog → gpg stdin.  Never argv, never shell history."""
+        """Qt password dialog → the chosen backend.
+
+        Never through ``argv``, never through a file we write ourselves, never
+        through shell history — whichever of the two is holding it.
+        """
         password, ok = QInputDialog.getText(
             self,
             "CalDAV password",
@@ -141,23 +177,7 @@ class FirstRunWizard(QWizard):
         )
         if not ok:
             return False
-
-        key_id = values.get("gpg_key_id")
-        if not key_id:
-            QMessageBox.critical(
-                self,
-                "No encryption key",
-                "DavPunk encrypts credentials with GnuPG, so it needs a key.\n\n"
-                "Create one with `gpg --full-generate-key`, then run DavPunk again.",
-            )
-            return False
-
-        try:
-            credentials.store_credential(password, paths.credential_file(values["id"]), key_id)
-        except credentials.CredentialError as exc:
-            QMessageBox.critical(self, "Could not save the credential", str(exc))
-            return False
-        return True
+        return store_password(self, values, password)
 
 
 def write_remote(config_path: Path, values: dict) -> Path:
@@ -179,9 +199,13 @@ def write_remote(config_path: Path, values: dict) -> Path:
     entry["name"] = values["name"]
     entry["url"] = values["url"]
     entry["username"] = values["username"]
-    entry["gpg_file"] = str(paths.credential_file(values["id"]))
-    if values.get("gpg_key_id"):
-        entry["gpg_key_id"] = values["gpg_key_id"]
+    # Written even when it is the default, because this is the one setting
+    # whose answer someone may want to check without opening the app.
+    entry["credential_backend"] = values.get("credential_backend") or "gpg"
+    if entry["credential_backend"] == "gpg":
+        entry["gpg_file"] = str(paths.credential_file(values["id"]))
+        if values.get("gpg_key_id"):
+            entry["gpg_key_id"] = values["gpg_key_id"]
     if not values.get("auto_sync", True):
         entry["auto_sync"] = False
     entry["sync_interval"] = values["sync_interval"]

@@ -29,6 +29,23 @@ def remote():
     return Remote(id="work", name="Work", url="https://cal.example.test/dav/")
 
 
+class _StubStore:
+    """Stands in for whichever backend the remote names, so a dry run does not
+    need a keyring or a warm gpg-agent to be tested."""
+
+    def __init__(self, secret: str) -> None:
+        self.secret = secret
+
+    def load(self) -> str:
+        return self.secret
+
+
+def _stub_credential(monkeypatch, secret: str = "password") -> None:
+    from davpunk.core import secret_store
+
+    monkeypatch.setattr(secret_store, "for_remote", lambda _remote: _StubStore(secret))
+
+
 @pytest.fixture
 def server():
     fake = FakeCalDAVServer()
@@ -38,10 +55,8 @@ def server():
 
 @pytest.fixture
 def plan(conn, remote, server, db_path, monkeypatch):
-    """A dry run wired to the fake server, with the gpg step stubbed out."""
-    from davpunk.core import sync_runner
-
-    monkeypatch.setattr(sync_runner, "decrypt_credential", lambda _path: "password")
+    """A dry run wired to the fake server, with the credential step stubbed."""
+    _stub_credential(monkeypatch)
     cache.reconcile_remotes([remote], conn)
     sync_engine.discover_calendars(remote, FakeClient(server), conn)
     # The shared `calendar_id` fixture seeds a ctag, and the fake server's
@@ -226,9 +241,7 @@ def test_a_read_failure_surfaces_rather_than_being_simulated_away(
     conn, remote, server, db_path, monkeypatch
 ):
     """Reads go to the network, so a bad password is found by a dry run."""
-    from davpunk.core import sync_runner
-
-    monkeypatch.setattr(sync_runner, "decrypt_credential", lambda _path: "password")
+    _stub_credential(monkeypatch)
     cache.reconcile_remotes([remote], conn)
     conn.commit()
 

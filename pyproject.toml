@@ -19,6 +19,8 @@ dependencies = [
 ui = ["PySide6>=6.7"]
 mcp = ["mcp>=1.2"]
 notify = ["jeepney>=0.8"]
+# The Secret Service backend, as an alternative to GnuPG for credentials.
+keyring = ["secretstorage>=3.3"]
 
 [project.scripts]
 davpunk = "davpunk.__main__:main"
@@ -48,6 +50,7 @@ addopts = "-q"
 filterwarnings = ["ignore::DeprecationWarning"]
 markers = [
     "radicale: integration tests that spawn a real Radicale server",
+    "keyring: integration tests that need a live Secret Service on the session bus",
     "qt: tests that need a Qt runtime",
 ]
 

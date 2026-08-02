@@ -13,18 +13,21 @@ import logging
 
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
+    QButtonGroup,
     QCheckBox,
     QComboBox,
     QFormLayout,
     QLabel,
     QLineEdit,
+    QRadioButton,
+    QSizePolicy,
     QSpinBox,
     QVBoxLayout,
     QWidget,
 )
 
 from davpunk import paths
-from davpunk.core import credentials
+from davpunk.core import credentials, secret_store
 from davpunk.ui.widgets import apply_help, help_label, hint
 
 log = logging.getLogger("davpunk.ui.remote_form")
@@ -46,8 +49,18 @@ HELP = {
     ),
     "username": "The username you log into that server with.",
     "password": (
-        "Stored encrypted with the GPG key below — never in plain text, never "
-        "in config.toml, and never in your shell history."
+        "Never stored in plain text, never in config.toml, and never in your "
+        "shell history. Where it does go is the choice below."
+    ),
+    "backend": (
+        "Two ways to keep a password, and neither is the beginner's option.\n\n"
+        "GnuPG encrypts it to a key only you hold, so a backup or a stolen "
+        "disk gives nothing away — but background sync only works while "
+        "gpg-agent still holds your passphrase, and you need a key to begin "
+        "with.\n\n"
+        "The login keyring is your desktop's own store, opened when you log "
+        "in. Nothing to set up and the sync daemon just works — but once it is "
+        "open, any program running as you can ask it for the password."
     ),
     "gpg_key": (
         "Which GPG encryption subkey protects your password. Only subkeys whose "
@@ -125,12 +138,17 @@ class RemoteForm(QWidget):
         self.skipped_note = hint("")
         self.skipped_note.hide()
         self._populate_keys(values.get("gpg_key_id"))
+        self._build_backend_choice(values.get("credential_backend"))
 
+        #: The label widget of each row, so a row can be hidden whole — a field
+        #: hidden without its label leaves the label naming the row below it.
+        self.labels: dict[str, QWidget] = {}
         for label, widget, key in (
             ("Account id", self.remote_id, "id"),
             ("Display name", self.name, "name"),
             ("Server URL", self.url, "url"),
             ("Username", self.username, "username"),
+            ("Password kept in", self.backend_box, "backend"),
             ("Encryption key", self.gpg_key, "gpg_key"),
             (None, self.skipped_note, None),
             ("Automatic sync", self.auto_sync, "auto_sync"),
@@ -143,7 +161,9 @@ class RemoteForm(QWidget):
                 # both columns keeps it to one line.
                 form.addRow(widget)
                 continue
-            form.addRow(help_label(label, HELP[key]), apply_help(widget, HELP[key]))
+            row_label = help_label(label, HELP[key])
+            self.labels[key] = row_label
+            form.addRow(row_label, apply_help(widget, HELP[key]))
 
         self.problem_label = QLabel()
         self.problem_label.setWordWrap(True)
@@ -152,7 +172,96 @@ class RemoteForm(QWidget):
 
         for widget in (self.remote_id, self.url, self.username):
             widget.textChanged.connect(self._revalidate)
+        # Last, because it hides rows and validates: both need every widget it
+        # touches to exist, and the problem label is the last one built.
+        self._on_backend_changed()
+
+    # --------------------------------------------------------------- backend
+
+    #: ``(backend, title, the one line that decides it)``.  Both are spelled
+    #: out where they are chosen: this is a trade-off, not a default with an
+    #: advanced alternative, and burying half of it behind a hover would be
+    #: picking for the user while pretending not to.
+    BACKENDS = (
+        (
+            "gpg",
+            "GnuPG",
+            "Encrypted to a key only you hold — safe in a backup. Background "
+            "sync works only while gpg-agent is warm.",
+        ),
+        (
+            "keyring",
+            "Login keyring",
+            "Kept by your desktop, unlocked when you log in. Nothing to set up "
+            "and the daemon just works. Anything running as you can read it.",
+        ),
+    )
+
+    def _build_backend_choice(self, selected: str | None) -> None:
+        self.backend_box = QWidget()
+        # The rationale under each radio wraps, and a container only passes a
+        # child's height-for-width up to the form if its own policy says it
+        # has one.  Without this the last line of the longer note is cut off.
+        policy = self.backend_box.sizePolicy()
+        policy.setHeightForWidth(True)
+        policy.setVerticalPolicy(QSizePolicy.Policy.MinimumExpanding)
+        self.backend_box.setSizePolicy(policy)
+        layout = QVBoxLayout(self.backend_box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+
+        self.backend_group = QButtonGroup(self)
+        self._backend_buttons: dict[str, QRadioButton] = {}
+        for backend, title, why in self.BACKENDS:
+            button = QRadioButton(title)
+            self.backend_group.addButton(button)
+            self._backend_buttons[backend] = button
+            layout.addWidget(button)
+            note = hint(why)
+            note.setContentsMargins(20, 0, 0, 6)
+            layout.addWidget(note)
+            button.toggled.connect(self._on_backend_changed)
+
+            unavailable = self._backend_unavailable(backend)
+            if unavailable and backend != selected:
+                # Still selectable when the config already names it — silently
+                # moving an account's password somewhere else is worse than
+                # showing a choice that needs something fixed first.
+                button.setEnabled(False)
+                note.setText(f"{why}  ✗ {unavailable}")
+
+        # An existing account starts on what it uses; a new one starts on
+        # neither, because there is no honest default between these two.
+        if selected in self._backend_buttons:
+            self._backend_buttons[selected].setChecked(True)
+        self._on_backend_changed()
+
+    def _backend_unavailable(self, backend: str) -> str | None:
+        """Why this backend cannot be used here, if it cannot."""
+        if backend == "keyring":
+            if not secret_store.keyring_available():
+                return "no keyring is running on this desktop"
+            return None
+        if not credentials.encryption_options():
+            return "no usable GnuPG encryption key — make one with `gpg --full-generate-key`"
+        return None
+
+    def _on_backend_changed(self, _checked: bool = False) -> None:
+        """The GPG key picker is GnuPG's business and nobody else's."""
+        label = self.labels.get("gpg_key") if hasattr(self, "labels") else None
+        if label is None:
+            return  # still building; the rows are hidden once they exist
+        gpg = self.selected_backend() == "gpg"
+        self.gpg_key.setVisible(gpg)
+        label.setVisible(gpg)
+        self.skipped_note.setVisible(gpg and bool(self.skipped_note.text()))
         self._revalidate()
+
+    def selected_backend(self) -> str | None:
+        for backend, button in self._backend_buttons.items():
+            if button.isChecked():
+                return backend
+        return None
 
     # ------------------------------------------------------------------ keys
 
@@ -227,6 +336,10 @@ class RemoteForm(QWidget):
             return "The server URL must start with https://"
         if not self.username.text().strip():
             return "A username is required."
+        if self.selected_backend() is None:
+            # No default is offered, so this is a real question rather than a
+            # box left unticked: the two answers protect different things.
+            return "Choose where to keep the password — the two options protect different things."
         return None
 
     def is_valid(self) -> bool:
@@ -236,6 +349,7 @@ class RemoteForm(QWidget):
 
     def values(self) -> dict:
         remote_id = self.remote_id.text().strip()
+        backend = self.selected_backend()
         return {
             "id": remote_id,
             "name": self.name.text().strip() or remote_id,
@@ -244,8 +358,11 @@ class RemoteForm(QWidget):
             "auto_sync": self.auto_sync.isChecked(),
             "sync_interval": self.interval.value(),
             "color": self.color.text().strip(),
-            "gpg_key_id": self.gpg_key.currentData(),
-            "gpg_file": str(paths.credential_file(remote_id)),
+            "credential_backend": backend,
+            # A key id beside a keyring account would encrypt nothing, and the
+            # config rejects the pair rather than let it look meaningful.
+            "gpg_key_id": self.gpg_key.currentData() if backend == "gpg" else None,
+            "gpg_file": str(paths.credential_file(remote_id)) if backend == "gpg" else None,
         }
 
 

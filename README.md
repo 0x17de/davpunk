@@ -17,7 +17,7 @@ keyboard-driven workflows.
 | Python | ≥ 3.11 |
 | SQLite | ≥ 3.35, built with FTS5 |
 | tz data | the system database, or the `tzdata` wheel |
-| GnuPG | `gpg` on `PATH`, with a running `gpg-agent` |
+| A place for passwords | either `gpg` on `PATH` with a running `gpg-agent`, **or** a Secret Service (gnome-keyring, KWallet, KeePassXC). Chosen per account — see [Where your password is kept](#where-your-password-is-kept). |
 
 `davpunk doctor` checks every one of these individually, so a machine that is
 missing two things tells you about both on the first run.
@@ -79,8 +79,8 @@ work, they just build DavPunk against this flake's own locked nixpkgs instead.
 ```
 
 The daemon is a systemd **user** service, not a system one: the config, cache
-and GnuPG-encrypted credentials are all per-user, and it needs that user's
-`gpg-agent` to decrypt anything at all. Users start it themselves with
+and credentials are all per-user, and it needs that user's `gpg-agent` or
+login keyring to read a password at all. Users start it themselves with
 `systemctl --user enable --now davpunk-sync`, or you set
 `programs.davpunk.daemon.autoStart = true`.
 
@@ -111,7 +111,7 @@ and GnuPG-encrypted credentials are all per-user, and it needs that user's
 ```
 
 Credentials are never part of `settings` — they live in GnuPG-encrypted files
-that the wizard or `gpg --encrypt` writes.
+that the wizard or `gpg --encrypt` writes, or in your login keyring.
 
 **Home Manager as a NixOS module**, which is how most configs run it — the
 module goes in `sharedModules`, the overlay goes in the system's nixpkgs, and
@@ -168,10 +168,10 @@ only the sync daemon should not need Qt installed.
 ## First run
 
 Launch `davpunk` with no config and the first-run wizard opens: account details
-(with `https://` enforced), a GPG key picker, a password prompt, and a
-`config.toml` written 0600 through `tomlkit` so any comments you add later
-survive. Every field has a `?` beside it — hover for what it means and what
-happens if you get it wrong.
+(with `https://` enforced), a choice of where to keep the password, a password
+prompt, and a `config.toml` written 0600 through `tomlkit` so any comments you
+add later survive. Every field has a `?` beside it — hover for what it means
+and what happens if you get it wrong.
 
 To set it up by hand instead, write `~/.config/davpunk/config.toml`:
 
@@ -182,12 +182,13 @@ default_view   = "list"      # list | kanban
 show_completed = false
 
 [[davpunk.remotes]]
-id            = "work"
-name          = "Work"
-url           = "https://cal.example.com/dav/"
-username      = "user@example.com"
-gpg_key_id    = "0x1A2B3C4D5E6F0003"
-sync_interval = 300
+id                 = "work"
+name               = "Work"
+url                = "https://cal.example.com/dav/"
+username           = "user@example.com"
+credential_backend = "gpg"          # gpg | keyring
+gpg_key_id         = "0x1A2B3C4D5E6F0003"
+sync_interval      = 300
 ```
 
 …and store the password, **without** a trailing newline:
@@ -203,6 +204,47 @@ chmod 600 ~/.config/davpunk/credentials/work.gpg
 `printf %s`, not `echo`: `echo` appends a newline, which becomes part of the
 password. DavPunk deliberately does not strip trailing whitespace from a
 decrypted credential, because a password may legitimately end in it.
+
+### Where your password is kept
+
+Two options, per account, and neither is the beginner's one. The wizard asks
+outright rather than picking for you, because they protect different things.
+
+**GnuPG** (`credential_backend = "gpg"`) encrypts it to a key only you hold, in
+`~/.config/davpunk/credentials/<id>.gpg`, mode 0600. A backup, a synced
+directory or a stolen disk gives nothing away. The cost: background sync only
+works while `gpg-agent` still holds your passphrase, and you need a key to
+begin with.
+
+**Login keyring** (`credential_backend = "keyring"`) hands it to your desktop's
+Secret Service — gnome-keyring, KWallet, KeePassXC — which PAM opens when you
+log in. Nothing to set up and the sync daemon just works. The cost: once the
+keyring is open, anything running as you can ask it for the password.
+
+```toml
+[[davpunk.remotes]]
+id                 = "work"
+url                = "https://cal.example.com/dav/"
+username           = "user@example.com"
+credential_backend = "keyring"      # and no gpg_key_id — it would encrypt nothing
+```
+
+Set the password from the wizard or **Edit → Preferences**; there is no
+hand-written equivalent of the `gpg --encrypt` line above, but `secret-tool`
+can inspect what was stored:
+
+```sh
+secret-tool search application davpunk
+```
+
+DavPunk **never unlocks the keyring itself.** A locked keyring is reported the
+same way a cold `gpg-agent` is — the sync is skipped, once-an-hour warning, and
+the UI says "credentials locked" — because a daemon that raises a password
+prompt at you from the background is worse than one that waits.
+
+Switching an account between the two always asks for the password again: it
+will not silently decrypt what you stored under the other one. Afterwards it
+offers to delete the copy left behind.
 
 ### Which GPG key
 
@@ -493,8 +535,15 @@ contacts a server only when you ask it to — *Sync now*, `Ctrl+R`, or *File →
 Preview sync…*. Without the daemon installed, nothing reaches your server until
 you press something.
 
-The daemon can only work while `gpg-agent` still holds your passphrase;
-`davpunk doctor` will tell you when that is the problem.
+The daemon can only work while it can read your passwords: `gpg-agent` still
+holding the passphrase, or the login keyring still open. It never forces a
+pinentry and never unlocks the keyring — it skips the cycle, warns once an
+hour, and the UI says "credentials locked". `davpunk doctor` tells you when
+that is the problem.
+
+`loginctl enable-linger` makes this worse for both backends rather than better:
+a daemon running with no login session has no warm agent, no unlocked keyring,
+and often no session bus at all.
 
 #### Excluding an account
 
@@ -587,20 +636,23 @@ copy and regenerate the token for you.
 
 ##### Encrypting the token at rest
 
-By default the token is a plain file, mode 0600. It can instead be
-GnuPG-encrypted, the same way CalDAV passwords are — pick a key under *Token at
-rest* in Preferences, or set it directly:
+By default the token is a plain file, mode 0600. It can instead go wherever a
+CalDAV password can — pick one under *Token at rest* in Preferences, or set it
+directly:
 
 ```toml
 [davpunk.mcp]
-token_gpg_key_id = "1A2B3C4D5E6F0003!"   # same form as a remote's gpg_key_id
+token_backend    = "gpg"                 # file | gpg | keyring
+token_gpg_key_id = "1A2B3C4D5E6F0003!"   # gpg only; same form as a remote's
 ```
 
-The token then lives in `mcp-token.gpg` and is decrypted when the server
-starts. That protects it if the file is ever backed up or synced somewhere it
-should not be — at the same cost as a CalDAV credential: the server can only
-start while `gpg-agent` still holds the passphrase. A cold agent is reported as
-such rather than as a bad token, and `davpunk doctor` checks it:
+With `gpg` the token lives in `mcp-token.gpg`; with `keyring` it is not on disk
+at all. Either protects it if the config directory is ever backed up or synced
+somewhere it should not be, at the same cost as a CalDAV credential: the server
+starts only once it can read the token back. A cold agent or a locked keyring
+is reported as such rather than as a bad token — and never causes a *second*
+token to be minted, which would silently invalidate the one your client holds.
+`davpunk doctor` checks it:
 
 ```
 PASS mcp-token  …/mcp-token.gpg is readable (encrypted to 1A2B3C4D5E6F0003!)

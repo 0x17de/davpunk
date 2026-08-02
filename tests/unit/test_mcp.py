@@ -763,6 +763,49 @@ def test_an_encrypted_token_round_trips(davpunk_home, monkeypatch):
     assert ensure_token(config) == token
 
 
+def test_a_token_can_live_in_the_login_keyring(davpunk_home, monkeypatch):
+    """The same three-way choice a CalDAV password gets, for the same reason:
+    a plain file is fine until the config directory ends up in a backup."""
+    from davpunk.core import secret_store
+    from davpunk.mcp.server import ensure_token
+
+    kept: dict[str, str] = {}
+    monkeypatch.setattr(
+        secret_store.KeyringStore, "store", lambda self, secret: kept.update(secret=secret)
+    )
+    monkeypatch.setattr(secret_store.KeyringStore, "exists", lambda self: "secret" in kept)
+    monkeypatch.setattr(secret_store.KeyringStore, "load", lambda self: kept["secret"])
+
+    config = McpConfig(token_backend="keyring")
+    token = ensure_token(config)
+
+    assert token == kept["secret"]
+    assert not config.token_path().exists()  # nothing on disk at all
+    assert ensure_token(config) == token  # stable across restarts
+
+
+def test_a_locked_keyring_does_not_mint_a_second_token(davpunk_home, monkeypatch):
+    """Existence is answerable while locked, so a cold start waits instead of
+    silently invalidating the token the client is holding."""
+    from davpunk.core import secret_store
+    from davpunk.core.credentials import CredentialLocked
+    from davpunk.mcp.server import TokenError, ensure_token
+
+    def _locked(self):
+        raise CredentialLocked("the login keyring is locked")
+
+    monkeypatch.setattr(secret_store.KeyringStore, "exists", lambda self: True)
+    monkeypatch.setattr(secret_store.KeyringStore, "load", _locked)
+    minted = []
+    monkeypatch.setattr(
+        secret_store.KeyringStore, "store", lambda self, secret: minted.append(secret)
+    )
+
+    with pytest.raises(TokenError, match="locked"):
+        ensure_token(McpConfig(token_backend="keyring"))
+    assert minted == []
+
+
 def test_a_cold_agent_is_reported_as_such_not_as_a_bad_token(davpunk_home, monkeypatch):
     """Otherwise the SSE server starts with a token nobody can produce and
     every client just gets 401."""

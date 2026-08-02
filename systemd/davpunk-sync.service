@@ -24,9 +24,16 @@ TimeoutStopSec=30
 #     default-cache-ttl 28800
 #     max-cache-ttl     86400
 #
+# An account whose password is in the login keyring instead has the same shape
+# of problem for a different reason: the daemon reads the Secret Service over
+# the session bus and never asks it to unlock, so it is functional only while
+# the keyring is open — which is normally from login until logout.  It waits
+# rather than raising a password prompt at you from the background.
+#
 # For a daemon that should run without a login session, `loginctl
-# enable-linger $USER` works — but be aware it makes the agent-cache problem
-# worse, not better: there is no session to unlock the key in.
+# enable-linger $USER` works — but be aware it makes this worse for *both*
+# backends, not better: there is no session to unlock the GnuPG key in, and no
+# unlocked keyring (often no session bus at all) either.
 
 # Logging goes to stderr, which systemd routes to the journal.
 StandardOutput=null

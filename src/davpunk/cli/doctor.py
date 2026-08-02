@@ -18,7 +18,7 @@ from pathlib import Path
 
 from davpunk import paths, preflight
 from davpunk.config import ConfigError, DavPunkConfig, gpg_key_present, load_config
-from davpunk.core import cache, credentials
+from davpunk.core import cache, credentials, secret_store
 
 
 class Status(StrEnum):
@@ -54,6 +54,7 @@ def _iter_checks(config_path: Path | None) -> Iterator[Check]:
 
     yield from _file_mode_checks(config, config_path)
     yield from _gpg_checks(config)
+    yield from _keyring_checks(config)
     yield from _database_checks()
     yield _notification_check()
     yield from _systemd_checks()
@@ -108,6 +109,8 @@ def _file_mode_checks(config: DavPunkConfig, config_path: Path | None) -> Iterat
         yield _mode_check("credentials-dir-mode", directory, 0o700)
 
     for remote in config.remotes:
+        if remote.credential_backend != "gpg":
+            continue  # nothing on disk to have the wrong mode
         gpg_file = remote.resolved_gpg_file()
         if gpg_file.exists():
             yield _mode_check(f"credential-mode[{remote.id}]", gpg_file, 0o600)
@@ -221,7 +224,26 @@ def _mode_check(name: str, path: Path, want: int) -> Check:
 # ----------------------------------------------------------------------- gpg
 
 
+def _uses_gpg(config: DavPunkConfig) -> bool:
+    """Does anything here actually need GnuPG?
+
+    A board that keeps every password in the login keyring has no use for it,
+    and failing its health check over a missing binary would be reporting a
+    problem the user has already solved.
+    """
+    if config.mcp.resolved_token_backend == "gpg":
+        return True
+    return any(remote.credential_backend == "gpg" for remote in config.remotes)
+
+
 def _gpg_checks(config: DavPunkConfig) -> Iterator[Check]:
+    gpg_remotes = [r for r in config.remotes if r.credential_backend == "gpg"]
+    if not _uses_gpg(config):
+        if credentials.gpg_available():
+            return  # nothing here uses it; its presence is not news
+        yield Check("gpg", Status.PASS, "not needed — nothing here is encrypted with it")
+        return
+
     if not credentials.gpg_available():
         yield Check("gpg", Status.FAIL, "gpg is not on PATH; DavPunk cannot read credentials")
         return
@@ -230,7 +252,7 @@ def _gpg_checks(config: DavPunkConfig) -> Iterator[Check]:
     keys = credentials.list_secret_keys()
     unusable = {k.key_id: k for k in credentials.unusable_encryption_keys(keys)}
 
-    for remote in config.remotes:
+    for remote in gpg_remotes:
         if remote.gpg_key_id:
             yield _key_check(remote, keys, unusable)
 
@@ -251,6 +273,61 @@ def _gpg_checks(config: DavPunkConfig) -> Iterator[Check]:
             yield Check(f"gpg-decrypt[{remote.id}]", Status.FAIL, str(exc))
         else:
             yield Check(f"gpg-decrypt[{remote.id}]", Status.PASS, "credential decrypts")
+
+
+# ------------------------------------------------------------------- keyring
+
+
+def _keyring_checks(config: DavPunkConfig) -> Iterator[Check]:
+    """The login keyring's version of "is the credential actually readable".
+
+    Locked is a WARN, not a FAIL, for the same reason a cold gpg-agent is: the
+    daemon is idle until you log in properly, and nothing is broken.  A *missing*
+    item is a FAIL — that password was never stored, or was stored somewhere
+    else, and no amount of waiting will produce it.
+    """
+    wanted = [
+        (f"keyring[{r.id}]", secret_store.for_remote(r.to_model()))
+        for r in config.remotes
+        if r.credential_backend == "keyring"
+    ]
+    if config.mcp.enabled and config.mcp.resolved_token_backend == "keyring":
+        wanted.append(("keyring[mcp-token]", secret_store.for_mcp_token(config.mcp)))
+    if not wanted:
+        return
+
+    if not secret_store.keyring_available():
+        yield Check(
+            "keyring",
+            Status.FAIL,
+            "no Secret Service is answering on the session bus — gnome-keyring, "
+            "KWallet or KeePassXC provides one. A daemon started outside a login "
+            "session has neither the bus nor an unlocked keyring.",
+        )
+        return
+    yield Check("keyring", Status.PASS, "a Secret Service is answering")
+
+    for name, store in wanted:
+        try:
+            if not store.exists():
+                yield Check(
+                    name,
+                    Status.FAIL,
+                    f"nothing stored for {store.describe()}; set the password again in Preferences",
+                )
+                continue
+            store.load()
+        except credentials.CredentialLocked:
+            yield Check(
+                name,
+                Status.WARN,
+                "the keyring is locked, so this cannot be read right now — "
+                "DavPunk waits rather than raising a password prompt at you",
+            )
+        except credentials.CredentialError as exc:
+            yield Check(name, Status.FAIL, str(exc))
+        else:
+            yield Check(name, Status.PASS, "the secret reads back")
 
 
 # ------------------------------------------------------------------ database

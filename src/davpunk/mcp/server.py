@@ -14,6 +14,7 @@ protocol channel, and a single stray ``print`` corrupts the stream.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import inspect
 import logging
 import os
@@ -68,48 +69,67 @@ def _ensure_plain_token(path: Path) -> str:
 
 
 def _ensure_encrypted_token(config) -> str:
-    """The token, GnuPG-encrypted at rest and decrypted here.
+    """The token, kept out of a plaintext file and read back here.
 
-    Same trade-off as a CalDAV credential: safe if the file is ever backed up
-    or synced somewhere it should not be, and unreadable while gpg-agent is
-    cold — so the failure is reported as such rather than as a bad token.
+    Same trade-off as a CalDAV credential, whichever backend holds it: safe if
+    the config directory is ever backed up somewhere it should not be, and
+    unreadable while gpg-agent is cold or the login keyring is locked — so the
+    failure is reported as such rather than as a bad token.
     """
-    from davpunk.core import credentials
+    from davpunk.core import credentials, secret_store
 
-    path = config.token_path()
-    if path.exists():
-        try:
-            return credentials.decrypt_credential(path).strip()
-        except credentials.CredentialLocked as exc:
-            raise TokenError(
-                f"the MCP token in {path} cannot be decrypted right now — "
-                f"gpg-agent may be cold. {exc}"
-            ) from exc
-        except credentials.CredentialError as exc:
-            raise TokenError(f"the MCP token in {path} could not be read: {exc}") from exc
+    store = secret_store.for_mcp_token(config)
+    try:
+        if _token_exists(store, config):
+            return store.load().strip()
+    except credentials.CredentialLocked as exc:
+        raise TokenError(
+            f"the MCP token in {store.describe()} cannot be read right now — "
+            f"gpg-agent may be cold, or the login keyring locked. {exc}"
+        ) from exc
+    except credentials.CredentialError as exc:
+        raise TokenError(f"the MCP token could not be read: {exc}") from exc
 
     token = secrets.token_urlsafe(TOKEN_BYTES)
     try:
-        credentials.store_credential(token, path, config.token_gpg_key_id)
+        store.store(token)
     except credentials.CredentialError as exc:
-        raise TokenError(f"could not write the encrypted MCP token: {exc}") from exc
-    log.info("Generated an encrypted MCP bearer token at %s", path)
+        raise TokenError(f"could not write the MCP token: {exc}") from exc
+    log.info("Generated an MCP bearer token in %s", store.describe())
     return token
+
+
+def _token_exists(store, config) -> bool:
+    """Is there a token, without reading it?
+
+    Existence has to be answerable while the backend is shut, or a cold start
+    would mint a second token and silently invalidate the one the client holds.
+    A file is there or not; a keyring item can be *found* while locked, because
+    its attributes are not the secret.
+    """
+    if config.resolved_token_backend != "keyring":
+        return config.token_path().exists()
+    return store.exists()
 
 
 def rotate_token(config) -> str:
     """Replace the token, invalidating whatever a client currently holds."""
-    from davpunk.core import credentials
+    from davpunk.core import credentials, secret_store
 
     for candidate in (config.token_path(), config.plain_token_path()):
         candidate.unlink(missing_ok=True)
+    if config.resolved_token_backend == "keyring":
+        # Rotating is also how you recover from a token nobody can read, so a
+        # keyring that will not give the old one up must not stop the new one.
+        with contextlib.suppress(credentials.CredentialError):
+            secret_store.for_mcp_token(config).delete()
 
     token = secrets.token_urlsafe(TOKEN_BYTES)
     if config.token_is_encrypted:
         try:
-            credentials.store_credential(token, config.token_path(), config.token_gpg_key_id)
+            secret_store.for_mcp_token(config).store(token)
         except credentials.CredentialError as exc:
-            raise TokenError(f"could not write the encrypted MCP token: {exc}") from exc
+            raise TokenError(f"could not write the MCP token: {exc}") from exc
     else:
         path = config.token_path()
         paths.ensure_dir(path.parent)

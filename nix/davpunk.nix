@@ -8,6 +8,10 @@
   withUi ? true,
   withMcp ? true,
   withNotifications ? true,
+  # The login keyring backend, as an alternative to GnuPG.  On by default: it
+  # is one small pure-Python package, and leaving it out means the option is
+  # simply missing from the setup wizard with no explanation.
+  withKeyring ? true,
 }:
 
 python3Packages.buildPythonApplication {
@@ -48,7 +52,8 @@ python3Packages.buildPythonApplication {
     ]
     ++ lib.optional withUi pyside6
     ++ lib.optional withMcp mcp
-    ++ lib.optional withNotifications jeepney;
+    ++ lib.optional withNotifications jeepney
+    ++ lib.optional withKeyring secretstorage;
 
   nativeBuildInputs = [
     makeWrapper
@@ -103,9 +108,11 @@ python3Packages.buildPythonApplication {
   '';
 
   postFixup = ''
-    # GnuPG is a runtime binary dependency: DavPunk shells out to it rather
-    # than using python-gnupg, because some of that library's paths stage the
-    # plaintext through temp files.
+    # GnuPG is a runtime binary dependency for accounts that use it: DavPunk
+    # shells out rather than using python-gnupg, because some of that library's
+    # paths stage the plaintext through temp files.  An install where every
+    # account keeps its password in the login keyring never invokes it — but
+    # the two are chosen per account, so the binary comes along regardless.
     for bin in $out/bin/davpunk $out/bin/davpunk-sync $out/bin/davpunk-mcp; do
       [ -e "$bin" ] || continue
       wrapProgram "$bin" --prefix PATH : ${lib.makeBinPath [ gnupg ]}

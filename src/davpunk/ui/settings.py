@@ -34,7 +34,8 @@ from PySide6.QtWidgets import (
 
 from davpunk import paths
 from davpunk.config import ConfigError, load_config
-from davpunk.core import credentials
+from davpunk.core import credentials, secret_store
+from davpunk.ui.first_run import store_password
 from davpunk.ui.remote_form import RemoteForm
 from davpunk.ui.widgets import apply_help, help_label, hint
 
@@ -56,6 +57,12 @@ class RemoteDialog(QDialog):
         self.setWindowTitle("Edit account" if self.editing else "Add an account")
         self.setMinimumWidth(660)
 
+        # Where the password is *now*, so a switch can offer to clean up after
+        # itself.  Read before the form can change any of it.
+        self._original_backend = (values or {}).get("credential_backend")
+        self._original_key_id = (values or {}).get("gpg_key_id")
+        self._original_gpg_file = (values or {}).get("gpg_file")
+
         layout = QVBoxLayout(self)
         self.form = RemoteForm(values, editing=self.editing)
         layout.addWidget(self.form)
@@ -66,8 +73,9 @@ class RemoteDialog(QDialog):
         self.set_password.clicked.connect(self._prompt_password)
         apply_help(
             self.set_password,
-            "The password is encrypted with the key above and written to its own "
-            "file, mode 0600. Run this again after changing the key.",
+            "The password goes wherever the choice above says. Run this again "
+            "after changing that choice or the encryption key — moving it is "
+            "the one thing DavPunk will not do behind your back.",
         )
         layout.addWidget(self.set_password)
 
@@ -86,15 +94,6 @@ class RemoteDialog(QDialog):
 
     def _prompt_password(self) -> None:
         values = self.form.values()
-        if not values["gpg_key_id"]:
-            QMessageBox.critical(
-                self,
-                "No encryption key",
-                "DavPunk encrypts credentials with GnuPG. Create a key with\n"
-                "`gpg --full-generate-key` and reopen this dialog.",
-            )
-            return
-
         password, ok = QInputDialog.getText(
             self,
             "CalDAV password",
@@ -103,17 +102,46 @@ class RemoteDialog(QDialog):
         )
         if not ok:
             return
-
-        try:
-            credentials.store_credential(
-                password, paths.credential_file(values["id"]), values["gpg_key_id"]
-            )
-        except credentials.CredentialError as exc:
-            QMessageBox.critical(self, "Could not save the password", str(exc))
+        if not store_password(self, values, password):
             return
-        QMessageBox.information(
-            self, "Password saved", f"Encrypted to {paths.credential_file(values['id'])}"
+        self._offer_to_clean_up(values)
+        where = secret_store.for_remote_backend(
+            values["credential_backend"],
+            values["id"],
+            key_id=values.get("gpg_key_id"),
+            gpg_file=values.get("gpg_file"),
+        ).describe()
+        QMessageBox.information(self, "Password saved", f"Stored in {where}")
+
+    def _offer_to_clean_up(self, values: dict) -> None:
+        """After a backend switch, the old copy is still sitting there.
+
+        A stale credential is a live password nobody is watching any more, so
+        it is offered for deletion — and only offered, because deleting a file
+        the user may still be relying on elsewhere is not ours to assume.
+        """
+        was = self._original_backend
+        now = values["credential_backend"]
+        if was is None or was == now:
+            return
+
+        old = secret_store.for_remote_backend(
+            was, values["id"], key_id=self._original_key_id, gpg_file=self._original_gpg_file
         )
+        answer = QMessageBox.question(
+            self,
+            "Remove the old copy?",
+            f"The password is now in {secret_store.for_remote_backend(now, values['id']).describe()}.\n\n"
+            f"Delete the one still in {old.describe()}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.Yes,
+        )
+        if answer != QMessageBox.StandardButton.Yes:
+            return
+        try:
+            old.delete()
+        except credentials.CredentialError as exc:
+            QMessageBox.warning(self, "Could not remove the old password", str(exc))
 
     def values(self) -> dict:
         return self.form.values()
@@ -266,23 +294,35 @@ class SettingsDialog(QDialog):
         )
         form.addRow(help_label("Port", port_help), apply_help(self.port, port_help))
 
+        # One control, because these are answers to one question — where the
+        # token lives — and splitting a backend picker from a key picker makes
+        # a key id sit there meaning nothing whenever the backend is not GnuPG.
         self.token_key = QComboBox()
-        self.token_key.addItem("Plain file, mode 0600", None)
+        self.token_key.addItem("Plain file, mode 0600", ("file", None))
+        if secret_store.keyring_available():
+            self.token_key.addItem("Login keyring", ("keyring", None))
         for key in credentials.encryption_options():
-            self.token_key.addItem(f"Encrypted to {key.short_id}", key.recipient)
-        if mcp.token_gpg_key_id:
-            at = self.token_key.findData(mcp.token_gpg_key_id)
-            if at < 0:
-                self.token_key.addItem(
-                    f"{mcp.token_gpg_key_id} (not in this keyring)", mcp.token_gpg_key_id
-                )
-                at = self.token_key.count() - 1
-            self.token_key.setCurrentIndex(at)
+            self.token_key.addItem(f"Encrypted to {key.short_id}", ("gpg", key.recipient))
+        at = self.token_key.findData((mcp.resolved_token_backend, mcp.token_gpg_key_id))
+        if at < 0:
+            # A key or a keyring the config names but this machine cannot
+            # offer.  Kept selectable: saving must not silently move a token.
+            label = mcp.token_gpg_key_id or mcp.resolved_token_backend
+            self.token_key.addItem(
+                f"{label} (not available here)",
+                (
+                    mcp.resolved_token_backend,
+                    mcp.token_gpg_key_id,
+                ),
+            )
+            at = self.token_key.count() - 1
+        self.token_key.setCurrentIndex(at)
         key_help = (
-            "Encrypting the token protects it if the file is ever backed up or "
-            "synced somewhere it should not be. The cost is the same as for a "
-            "CalDAV password: the server can only start while gpg-agent still "
-            "holds the passphrase."
+            "Keeping the token out of a plain file protects it if the config "
+            "directory is ever backed up somewhere it should not be. The cost "
+            "is the same as for a CalDAV password: GnuPG needs a warm "
+            "gpg-agent, and the login keyring needs to be unlocked — the "
+            "server will not start until it can read the token back."
         )
         form.addRow(help_label("Token at rest", key_help), apply_help(self.token_key, key_help))
 
@@ -359,13 +399,19 @@ class SettingsDialog(QDialog):
         Reading the token has to follow the *pending* choice, or pressing Show
         after switching keys would decrypt the wrong file.
         """
+        backend, key_id = self._token_choice()
         return self.config.mcp.model_copy(
             update={
                 "transport": self.transport.currentData(),
                 "port": self.port.value(),
-                "token_gpg_key_id": self.token_key.currentData(),
+                "token_backend": backend,
+                "token_gpg_key_id": key_id,
             }
         )
+
+    def _token_choice(self) -> tuple[str, str | None]:
+        """``(backend, key id)`` — one combo, two config keys."""
+        return self.token_key.currentData() or ("file", None)
 
     def _reveal_token(self) -> str | None:
         from davpunk.mcp.server import TokenError, ensure_token
@@ -471,7 +517,8 @@ class SettingsDialog(QDialog):
                     "enabled": self.mcp_enabled.isChecked(),
                     "transport": self.transport.currentData(),
                     "port": self.port.value(),
-                    "token_gpg_key_id": self.token_key.currentData(),
+                    "token_backend": self._token_choice()[0],
+                    "token_gpg_key_id": self._token_choice()[1],
                     "capabilities": {
                         "read": self.cap_read.isChecked(),
                         "write": self.cap_write.isChecked(),
@@ -528,12 +575,16 @@ def write_settings(config_path, *, general: dict, remotes: list[dict], mcp: dict
         if key in mcp:
             mcp_table[key] = mcp[key]
 
+    if "token_backend" in mcp:
+        mcp_table["token_backend"] = mcp["token_backend"]
+
     if "token_gpg_key_id" in mcp:
         if mcp["token_gpg_key_id"]:
             mcp_table["token_gpg_key_id"] = mcp["token_gpg_key_id"]
         elif "token_gpg_key_id" in mcp_table:
-            # Switching back to a plain token has to remove it, or DavPunk
-            # keeps looking for mcp-token.gpg.
+            # Switching away from GnuPG has to remove it, or DavPunk keeps
+            # looking for mcp-token.gpg — and the config rejects a key id
+            # sitting beside a backend that would not use it.
             del mcp_table["token_gpg_key_id"]
 
     capabilities = mcp_table.get("capabilities")
@@ -551,6 +602,7 @@ def write_settings(config_path, *, general: dict, remotes: list[dict], mcp: dict
             "name",
             "url",
             "username",
+            "credential_backend",
             "gpg_file",
             "gpg_key_id",
             "auto_sync",

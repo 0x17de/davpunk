@@ -858,6 +858,42 @@ timer units per alarm; there is no wake-from-suspend delivery.
 
 ### 14.1 Credentials
 
+**Two backends, chosen per account.** `davpunk.core.secret_store` is the seam:
+`for_remote()` / `for_mcp_token()` return a `SecretStore` — `store` / `load` /
+`delete` / `describe` — and every consumer (sync, MCP, the wizard, Preferences,
+`doctor`) asks for one rather than naming a mechanism. `credentials.py` is
+unchanged and *is* the GnuPG backend; its subkey discovery and colon-listing
+parsing are GnuPG's own problems and stay there.
+
+`credential_backend` defaults to `gpg`, so every config written before this
+existed keeps meaning what it meant. A `gpg_key_id` beside
+`credential_backend = "keyring"` is a config **error**, not a leftover: a
+setting that governs nothing reads as one that does.
+
+The keyring backend is a Secret Service item, via `secretstorage`:
+
+| | |
+|---|---|
+| attributes | `{application: "davpunk", kind: "caldav-password"\|"mcp-token", key: <remote id \| "mcp">}` |
+| label | `DavPunk — <name> (<username>)` |
+| collection | the default one |
+
+`load()` **never unlocks.** A locked collection raises `CredentialLocked`, the
+same class of answer as a cold `gpg-agent`, and the caller skips the cycle and
+warns once an hour. Only an explicit UI action calls `unlock()`, because a
+background daemon that raises a password dialog behind the user's back is worse
+than one that waits. Existence *is* answerable while locked — attributes are
+not the secret — which is what lets `doctor` tell "locked" from "never stored",
+and stops the MCP server minting a second token on every cold start.
+
+> **The two are not equally strong, and the UI says so rather than choosing.**
+> GnuPG encrypts to a key only the user holds: a backup, a synced directory or
+> a stolen disk gives nothing away, and the cost is a warm agent. The login
+> keyring is opened by PAM at login, so the daemon just works — and once open,
+> any process running as this user can ask it for the secret. The first-run
+> wizard offers both with a one-line rationale each and **preselects neither**;
+> the form is invalid until one is chosen.
+
 - `~/.config/davpunk/credentials/<remote-id>.gpg`, mode **0600 at creation**;
   the directory is **0700**. Modes are verified at startup and by
   `davpunk doctor --fix`.
@@ -885,7 +921,9 @@ timer units per alarm; there is no wake-from-suspend delivery.
   reimplementing GnuPG's selection rules.
 
 > The plaintext credential is never written to disk, never appears in `argv`,
-> never enters shell history, and is never logged or stored in SQLite. It is
+> never enters shell history, and is never logged or stored in SQLite — with
+> either backend. `secretstorage` negotiates a DH-encrypted session, so it is
+> not cleartext on the D-Bus socket either. It is
 > held in process memory for the duration of one request. Python cannot
 > guarantee prompt zeroing of string memory; treat process memory as in scope
 > for an attacker who already has code execution as this user.
@@ -894,14 +932,18 @@ timer units per alarm; there is no wake-from-suspend delivery.
 `allow_insecure = true`, which logs a prominent warning. `verify_tls = true` is
 the default, disableable per-remote for self-signed Radicale setups.
 
-**Daemon and gpg-agent.** The daemon inherits the standard GnuPG environment and
-never forces a pinentry; it is functional only while gpg-agent holds the
-passphrase. `default-cache-ttl` / `max-cache-ttl` are recommended in the unit
+**Daemon, gpg-agent and the keyring.** The daemon inherits the standard GnuPG
+environment and never forces a pinentry; it is functional only while gpg-agent
+holds the passphrase. A keyring-backed account has the same shape of limit for
+a different reason: the daemon reads the Secret Service over the session bus
+and never unlocks it, so it works while the keyring is open — normally login to
+logout. `default-cache-ttl` / `max-cache-ttl` are recommended in the unit
 file's comments and checked by `davpunk doctor`. On decrypt failure the remote
 is skipped with a **rate-limited** warning (once per hour) and
 `sync_status.last_error` is set so the UI can show "credentials locked".
 `loginctl enable-linger` is mentioned for daemon-without-session use, with the
-caveat that it makes the agent-cache problem worse.
+caveat that it makes this worse for **both** backends: no session to unlock the
+key in, no unlocked keyring, and often no session bus at all.
 
 ### 14.2 Logging
 
@@ -929,8 +971,12 @@ caveat that it makes the agent-cache problem worse.
 `doctor` checks: Python ≥ 3.11; SQLite ≥ 3.35 with FTS5; `PRAGMA
 integrity_check` and FTS `integrity-check` (offering `'rebuild'` on failure);
 schema version vs binary; file modes on config (0600), credentials dir (0700),
-each `.gpg` (0600), MCP token (0600); `gpg` present; each remote's `gpg_key_id`
-in the keyring; a test decrypt per remote (detects a cold gpg-agent); `zoneinfo`
+each `.gpg` (0600), MCP token (0600); for the accounts that use GnuPG: `gpg`
+present, each `gpg_key_id` in GnuPG's keyring, and a test decrypt (detects a
+cold agent); for the accounts that use the login keyring: a Secret Service
+answering, the item present, and a read-back — locked is a WARN, absent a FAIL.
+An install where nothing uses GnuPG does **not** fail for a missing `gpg`, which
+would be reporting a problem the user has already solved. `zoneinfo`
 resolves a sample TZID; the D-Bus notification service is reachable; each
 remote's URL resolves with a valid certificate; systemd unit installed and
 active. Exit non-zero on any FAIL. `--fix` repairs file modes only.
@@ -1358,8 +1404,9 @@ id             = "work"
 name           = "Work"
 url            = "https://cal.example.com/dav/"
 username       = "user@example.com"
-gpg_file       = "~/.config/davpunk/credentials/work.gpg"
-gpg_key_id     = "0x1A2B3C4D5E6F0003"     # validated against the keyring
+credential_backend = "gpg"                # gpg | keyring; default gpg
+gpg_file       = "~/.config/davpunk/credentials/work.gpg"   # gpg only
+gpg_key_id     = "0x1A2B3C4D5E6F0003"     # gpg only; validated against GnuPG's keyring
 sync_interval  = 300
 color          = "#4A9EFF"
 pinned_view    = false
@@ -1391,6 +1438,8 @@ transport   = "stdio"          # stdio (recommended) | sse
 bind        = "127.0.0.1"      # SSE binds loopback only
 port        = 8787
 token_file  = "~/.config/davpunk/mcp-token"   # 0600, generated on first enable
+token_backend = "file"         # file | gpg | keyring; unset is inferred from
+                               # token_gpg_key_id, so older configs still mean gpg
 audit       = true
 list_limit  = 100              # default page size; hard cap 500
 

@@ -2751,6 +2751,24 @@ def test_the_wizard_accepts_https(qapp, davpunk_home):
     page.url.setText("https://cal.example.com/dav/")
     page.remote_id.setText("work")
     page.username.setText("u")
+    _pick_backend(page.form, "keyring")
+    assert page.isComplete()
+
+
+def test_the_wizard_will_not_move_on_until_the_password_has_somewhere_to_go(qapp, davpunk_home):
+    """Neither backend is preselected: GnuPG and the login keyring protect
+    different things, and quietly picking one is answering for the user."""
+    from davpunk.ui.first_run import RemotePage
+
+    page = RemotePage()
+    page.url.setText("https://cal.example.com/dav/")
+    page.remote_id.setText("work")
+    page.username.setText("u")
+
+    assert not page.isComplete()
+    assert "where to keep the password" in page.problem.text()
+
+    _pick_backend(page.form, "gpg")
     assert page.isComplete()
 
 
@@ -3155,6 +3173,103 @@ def test_the_wizard_explains_what_it_will_ask_for(qapp, davpunk_home):
     assert "Preferences" in text  # tells you it is all changeable later
 
 
+def _pick_backend(form, backend):
+    form._backend_buttons[backend].setChecked(True)
+
+
+def _one_usable_key(monkeypatch):
+    """A keyring with exactly one usable encryption subkey, so the GnuPG option
+    is offerable in tests that are not about GnuPG."""
+    from davpunk.core import credentials
+    from davpunk.ui import remote_form
+
+    listing = (
+        "sec:u:4096:1:AAAA000000000001:1700951442:0:::::cESCA:::#::23:\n"
+        "uid:u::::1700951442::ABC::Ada <ada@example.com>::::::::::0:\n"
+        "ssb:u:4096:1:BBBB000000000002:1700951442:0:::::e::::::23:\n"
+    )
+    keys = credentials.parse_colon_listing(listing)
+    monkeypatch.setattr(remote_form.credentials, "list_secret_keys", lambda: keys)
+    monkeypatch.setattr(credentials, "list_secret_keys", lambda: keys)
+
+
+def test_neither_backend_is_preselected_for_a_new_account(qapp, davpunk_home):
+    """The two protect different things, so there is no honest default — and a
+    form that quietly picks one has answered the question for you."""
+    from davpunk.ui.remote_form import RemoteForm
+
+    form = RemoteForm()
+    form.remote_id.setText("work")
+    form.url.setText("https://cal.example.com/dav/")
+    form.username.setText("u")
+
+    assert form.selected_backend() is None
+    assert "where to keep the password" in (form.problem() or "")
+
+
+def test_an_existing_account_starts_on_what_it_uses(qapp, davpunk_home):
+    from davpunk.ui.remote_form import RemoteForm
+
+    form = RemoteForm({"id": "work", "credential_backend": "keyring"}, editing=True)
+    assert form.selected_backend() == "keyring"
+
+
+def test_the_key_picker_belongs_to_gnupg_and_hides_with_it(qapp, davpunk_home, monkeypatch):
+    from davpunk.ui.remote_form import RemoteForm
+
+    _one_usable_key(monkeypatch)
+    form = RemoteForm()
+    form.show()
+
+    _pick_backend(form, "gpg")
+    assert form.gpg_key.isVisible()
+    assert form.labels["gpg_key"].isVisible()
+
+    _pick_backend(form, "keyring")
+    assert not form.gpg_key.isVisible()
+    assert not form.labels["gpg_key"].isVisible()
+
+
+def test_a_keyring_account_carries_no_gpg_settings(qapp, davpunk_home, monkeypatch):
+    """A key id beside a keyring account would encrypt nothing, and the config
+    refuses the pair rather than let it look like it still governs something."""
+    from davpunk.ui.remote_form import RemoteForm
+
+    _one_usable_key(monkeypatch)
+    form = RemoteForm({"id": "work", "gpg_key_id": "BBBB000000000002!"}, editing=True)
+    _pick_backend(form, "keyring")
+
+    values = form.values()
+    assert values["credential_backend"] == "keyring"
+    assert values["gpg_key_id"] is None
+    assert values["gpg_file"] is None
+
+
+def test_a_backend_with_nothing_behind_it_says_so_instead_of_vanishing(
+    qapp, davpunk_home, monkeypatch
+):
+    """ "My option is missing" is a mystery; "no keyring is running" is a
+    to-do.  The same courtesy the key picker already pays."""
+    from davpunk.ui import remote_form
+
+    monkeypatch.setattr(remote_form.secret_store, "keyring_available", lambda: False)
+    form = remote_form.RemoteForm()
+
+    assert not form._backend_buttons["keyring"].isEnabled()
+
+
+def test_a_backend_the_config_already_names_stays_selectable(qapp, davpunk_home, monkeypatch):
+    """Even with the keyring gone, silently moving the account's password
+    somewhere else on the next save would be worse."""
+    from davpunk.ui import remote_form
+
+    monkeypatch.setattr(remote_form.secret_store, "keyring_available", lambda: False)
+    form = remote_form.RemoteForm({"id": "work", "credential_backend": "keyring"}, editing=True)
+
+    assert form._backend_buttons["keyring"].isEnabled()
+    assert form.selected_backend() == "keyring"
+
+
 def test_the_key_picker_offers_only_usable_subkeys(qapp, davpunk_home, monkeypatch):
     from davpunk.core import credentials
     from davpunk.ui import remote_form
@@ -3254,16 +3369,35 @@ def test_stdio_disables_the_port_and_token(qapp, sse_config):
     assert "no token" in dialog.token_value.placeholderText()
 
 
-def test_the_token_encryption_key_is_selectable(qapp, sse_config):
+def test_where_the_token_lives_is_one_question_with_one_control(qapp, sse_config, monkeypatch):
+    """A backend picker beside a key picker leaves the key sitting there
+    meaning nothing whenever the backend is not GnuPG."""
+    from davpunk.ui import settings
+
+    monkeypatch.setattr(settings.secret_store, "keyring_available", lambda: True)
     dialog = settings_for(sse_config)
-    assert None in {dialog.token_key.itemData(i) for i in range(dialog.token_key.count())}
-    assert dialog.token_key.currentData() == "ABCD1234!"
+    offered = {dialog.token_key.itemData(i) for i in range(dialog.token_key.count())}
+
+    assert ("file", None) in offered
+    assert ("keyring", None) in offered
+    assert dialog.token_key.currentData() == ("gpg", "ABCD1234!")
+    assert dialog._token_choice() == ("gpg", "ABCD1234!")
+
+
+def test_the_keyring_is_not_offered_where_there_is_none(qapp, sse_config, monkeypatch):
+    from davpunk.ui import settings
+
+    monkeypatch.setattr(settings.secret_store, "keyring_available", lambda: False)
+    dialog = settings_for(sse_config)
+    offered = {dialog.token_key.itemData(i) for i in range(dialog.token_key.count())}
+
+    assert ("keyring", None) not in offered
 
 
 def test_a_configured_token_key_missing_from_the_keyring_is_kept(qapp, sse_config):
     """Saving must not silently drop it and re-key the token."""
     dialog = settings_for(sse_config)
-    assert dialog.token_key.currentData() == "ABCD1234!"
+    assert dialog.token_key.currentData() == ("gpg", "ABCD1234!")
 
 
 def test_the_token_is_not_revealed_until_asked(qapp, sse_config):

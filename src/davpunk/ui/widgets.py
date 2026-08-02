@@ -86,6 +86,14 @@ def hint(text: str = "", parent: QWidget | None = None) -> QLabel:
     """
     label = QLabel(text, parent)
     label.setWordWrap(True)
+    # Word wrap alone does not make a QLabel ask its layout for the height its
+    # text actually needs — the size *policy* has to say so, and Qt does not
+    # set that flag for you.  Without it a wrapped hint is given the height of
+    # its unwrapped guess and the last line is clipped.
+    policy = label.sizePolicy()
+    policy.setHeightForWidth(True)
+    policy.setVerticalPolicy(QSizePolicy.Policy.MinimumExpanding)
+    label.setSizePolicy(policy)
     label.setStyleSheet("color: palette(mid); font-size: 11px;")
     return label
 

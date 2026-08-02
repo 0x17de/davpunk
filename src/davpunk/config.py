@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from davpunk import paths
+from davpunk.core import secret_store
 from davpunk.models.remote import Remote
 
 log = logging.getLogger("davpunk.config")
@@ -175,6 +176,10 @@ class McpConfig(BaseModel):
     #: treatment CalDAV passwords get.  The cost is the same too: the server
     #: can only start while gpg-agent still holds the passphrase.
     token_gpg_key_id: str | None = None
+    #: ``file`` (0600 plaintext), ``gpg`` or ``keyring``.  Unset is resolved
+    #: from ``token_gpg_key_id`` so a config written before this key existed
+    #: keeps meaning what it meant.
+    token_backend: str | None = None
     audit: bool = True
     list_limit: int = 100
     capabilities: McpCapabilities = Field(default_factory=McpCapabilities)
@@ -204,14 +209,46 @@ class McpConfig(BaseModel):
             raise ValueError("list_limit must be >= 1")
         return min(value, MCP_LIST_LIMIT_CAP)
 
+    @field_validator("token_backend")
+    @classmethod
+    def _known_token_backend(cls, value: str | None) -> str | None:
+        if value is not None and value not in ("file", *secret_store.BACKENDS):
+            raise ValueError("mcp.token_backend must be 'file', 'gpg' or 'keyring'")
+        return value
+
+    @model_validator(mode="after")
+    def _token_backend_is_unambiguous(self) -> McpConfig:
+        if self.token_backend == "gpg" and not self.token_gpg_key_id:
+            raise ValueError("mcp.token_backend = 'gpg' needs mcp.token_gpg_key_id")
+        if self.token_backend in ("file", "keyring") and self.token_gpg_key_id:
+            raise ValueError(
+                f"mcp.token_gpg_key_id is set but token_backend is "
+                f"{self.token_backend!r}, so it would encrypt nothing"
+            )
+        return self
+
+    @property
+    def resolved_token_backend(self) -> str:
+        """What the config *means*, with the pre-``token_backend`` spelling
+        still meaning what it did: a key id alone said "encrypt it"."""
+        if self.token_backend:
+            return self.token_backend
+        return "gpg" if self.token_gpg_key_id else "file"
+
     @property
     def token_is_encrypted(self) -> bool:
-        return bool(self.token_gpg_key_id)
+        """Is the token kept somewhere other than a plaintext file?"""
+        return self.resolved_token_backend != "file"
 
     def token_path(self) -> Path:
-        """Where the token actually lives, encrypted or not."""
+        """Where the token file lives, for the backends that use one.
+
+        The keyring keeps no file, but the path is still what names the item's
+        neighbours in ``doctor`` output, so it stays defined rather than
+        raising and forcing every caller to branch.
+        """
         base = self.plain_token_path()
-        return base.with_name(base.name + ".gpg") if self.token_is_encrypted else base
+        return base.with_name(base.name + ".gpg") if self.resolved_token_backend == "gpg" else base
 
     def plain_token_path(self) -> Path:
         if self.token_file:
@@ -226,6 +263,12 @@ class RemoteConfig(BaseModel):
     name: str | None = None
     url: str
     username: str | None = None
+    #: Where this account's password is kept.  ``gpg`` encrypts it to a key
+    #: only you hold — safe in a backup, and only readable while gpg-agent is
+    #: warm.  ``keyring`` hands it to the desktop's Secret Service, which PAM
+    #: opens at login — nothing to set up and the daemon just works, at the
+    #: price of every process running as you being able to ask for it.
+    credential_backend: str = "gpg"
     gpg_file: str | None = None
     gpg_key_id: str | None = None
     #: Sync this account in the background.  Off does not mean "never sync":
@@ -254,6 +297,26 @@ class RemoteConfig(BaseModel):
         if value < 30:
             raise ValueError("sync_interval must be at least 30 seconds")
         return value
+
+    @field_validator("credential_backend")
+    @classmethod
+    def _known_backend(cls, value: str) -> str:
+        if value not in secret_store.BACKENDS:
+            raise ValueError(
+                f"credential_backend must be one of {', '.join(secret_store.BACKENDS)}"
+            )
+        return value
+
+    @model_validator(mode="after")
+    def _backend_is_unambiguous(self) -> RemoteConfig:
+        """A ``gpg_key_id`` beside ``credential_backend = "keyring"`` governs
+        nothing, and a setting that governs nothing reads as one that does."""
+        if self.credential_backend == "keyring" and self.gpg_key_id:
+            raise ValueError(
+                f"remote {self.id!r}: gpg_key_id is set but credential_backend is "
+                "'keyring', so it would encrypt nothing — remove one of the two"
+            )
+        return self
 
     @model_validator(mode="after")
     def _transport_security(self) -> RemoteConfig:
@@ -284,6 +347,7 @@ class RemoteConfig(BaseModel):
             name=self.name,
             url=self.url,
             username=self.username,
+            credential_backend=self.credential_backend,
             gpg_file=str(self.resolved_gpg_file()),
             gpg_key_id=self.gpg_key_id,
             auto_sync=self.auto_sync,
@@ -385,11 +449,15 @@ def detect_duplicate_bindings(keymap: dict[str, str]) -> None:
         raise ValueError("duplicate key bindings: " + "; ".join(clashes))
 
 
-def load_config(path: Path | str | None = None, *, validate_keyring: bool = False) -> DavPunkConfig:
+def load_config(path: Path | str | None = None, *, validate_gpg_key: bool = False) -> DavPunkConfig:
     """Read and validate the TOML config.
 
     Raises :class:`ConfigError` with the Pydantic message verbatim, naming the
     file and the offending key, so first-run can show it without crashing.
+
+    ``validate_gpg_key`` was ``validate_keyring``, which meant GnuPG's keyring
+    and now sits one line away from a login-keyring backend that is a different
+    thing entirely.
     """
     # ``--config`` arrives as a string from argparse; coerce at the boundary so
     # no caller has to remember to.
@@ -414,8 +482,10 @@ def load_config(path: Path | str | None = None, *, validate_keyring: bool = Fals
     except ValidationError as exc:
         raise ConfigError(str(exc), path=path) from exc
 
-    if validate_keyring:
+    if validate_gpg_key:
         for remote in config.remotes:
+            if remote.credential_backend != "gpg":
+                continue
             if remote.gpg_key_id and not gpg_key_present(remote.gpg_key_id):
                 raise ConfigError(
                     f"remote {remote.id!r}: gpg_key_id {remote.gpg_key_id!r} is not in the keyring",
@@ -425,7 +495,7 @@ def load_config(path: Path | str | None = None, *, validate_keyring: bool = Fals
 
 
 def gpg_key_present(key_id: str) -> bool:
-    """Is ``key_id`` a secret key in the user's keyring?"""
+    """Is ``key_id`` a secret key in GnuPG's own keyring?"""
     try:
         result = subprocess.run(
             ["gpg", "--batch", "--list-secret-keys", "--with-colons", key_id],

@@ -72,9 +72,15 @@ in
   config = lib.mkIf cfg.enable {
     environment.systemPackages = [ cfg.package ];
 
-    # GnuPG is a runtime binary dependency, not an optional nicety: DavPunk
-    # cannot read a single credential without it.
+    # GnuPG is a runtime binary dependency for any account that uses it, and it
+    # is the default for a new one.  mkDefault, so a host that keeps every
+    # password in the login keyring can turn it off.
     programs.gnupg.agent.enable = lib.mkDefault true;
+
+    # The other backend needs a Secret Service on the session bus.  Not forced
+    # on: most desktop profiles already provide one (gnome-keyring, KWallet),
+    # and turning it on here would be a second opinion about the user's
+    # desktop.  `davpunk doctor` says plainly when nothing is answering.
 
     systemd.user.services.davpunk-sync = lib.mkIf cfg.daemon.enable {
       description = "DavPunk CalDAV sync daemon";

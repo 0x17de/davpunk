@@ -19,11 +19,10 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass, field
 
-from davpunk.core import cache
+from davpunk.core import cache, secret_store
 from davpunk.core.credentials import (
     CredentialError,
     DecryptWarningLimiter,
-    decrypt_credential,
 )
 from davpunk.core.locking import SyncBusy, remote_sync_lock
 from davpunk.models.remote import Remote
@@ -126,10 +125,12 @@ class SyncRunner:
         from davpunk.core import sync_engine
 
         try:
-            credential = decrypt_credential(self.remote.gpg_file or "")
+            credential = secret_store.for_remote(self.remote).load()
         except CredentialError as exc:
             # Skip the remote with a rate-limited warning, and record it so the
-            # UI can show "credentials locked".
+            # UI can show "credentials locked".  A cold gpg-agent and a locked
+            # login keyring are the same answer — "not now" — and neither is
+            # worth a password prompt nobody asked for.
             if self._warn_limiter.should_warn(self.remote.id):
                 log.warning("Skipping remote %s: %s", self.remote.id, exc)
             cache.set_sync_status(self.remote.id, self.conn, last_error=str(exc))

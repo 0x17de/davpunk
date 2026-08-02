@@ -77,6 +77,7 @@
                   pyside6
                   mcp
                   jeepney
+                  secretstorage
                   # dev
                   pytest
                   pytest-asyncio

@@ -19,6 +19,8 @@ class Remote(BaseModel):
     name: str | None = None
     url: str = ""
     username: str | None = None
+    #: "gpg" or "keyring" — see :mod:`davpunk.core.secret_store`.
+    credential_backend: str = "gpg"
     gpg_file: str | None = None
     gpg_key_id: str | None = None
     auto_sync: bool = True

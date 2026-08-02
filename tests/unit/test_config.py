@@ -218,3 +218,100 @@ def test_auto_sync_is_read_from_the_toml(tmp_path):
     )
     path.chmod(0o600)
     assert load_config(path).remotes[0].auto_sync is False
+
+
+# --------------------------------------------------------- credential backend
+
+
+def test_a_remote_keeps_its_password_in_gnupg_unless_it_says_otherwise():
+    """Every config written before the keyring existed means GnuPG, and reading
+    it as anything else would look for a secret nobody ever stored there."""
+    from davpunk.config import RemoteConfig
+
+    remote = RemoteConfig(id="a", url="https://x.test/")
+    assert remote.credential_backend == "gpg"
+    assert remote.to_model().credential_backend == "gpg"
+
+
+def test_the_backend_is_read_from_the_toml_and_reaches_the_model(tmp_path):
+    from davpunk.config import load_config
+
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[davpunk]\n[[davpunk.remotes]]\nid = "work"\nurl = "https://x.test/"\n'
+        'credential_backend = "keyring"\n'
+    )
+    path.chmod(0o600)
+    assert load_config(path).remotes[0].to_model().credential_backend == "keyring"
+
+
+def test_an_unknown_backend_is_rejected_by_name(tmp_path):
+    import pytest as _pytest
+
+    from davpunk.config import RemoteConfig
+
+    with _pytest.raises(ValueError, match="credential_backend"):
+        RemoteConfig(id="a", url="https://x.test/", credential_backend="kwallet")
+
+
+def test_a_key_id_beside_a_keyring_account_is_refused():
+    """It would encrypt nothing, and a setting that governs nothing reads as
+    one that does."""
+    import pytest as _pytest
+
+    from davpunk.config import RemoteConfig
+
+    with _pytest.raises(ValueError, match="gpg_key_id"):
+        RemoteConfig(
+            id="a",
+            url="https://x.test/",
+            credential_backend="keyring",
+            gpg_key_id="ABCD!",
+        )
+
+
+def test_a_gpg_key_check_skips_the_accounts_that_do_not_use_gpg(tmp_path, monkeypatch):
+    """--validate would otherwise fail an account for a key it never named."""
+    from davpunk import config as config_module
+    from davpunk.config import load_config
+
+    path = tmp_path / "config.toml"
+    path.write_text(
+        '[davpunk]\n[[davpunk.remotes]]\nid = "work"\nurl = "https://x.test/"\n'
+        'credential_backend = "keyring"\n'
+    )
+    path.chmod(0o600)
+    monkeypatch.setattr(config_module, "gpg_key_present", lambda _key: False)
+
+    assert load_config(path, validate_gpg_key=True).remotes[0].id == "work"
+
+
+# ---------------------------------------------------------------- mcp token
+
+
+def test_the_token_backend_is_inferred_from_the_older_spelling():
+    """A config that only ever said `token_gpg_key_id` still means GnuPG."""
+    from davpunk.config import McpConfig
+
+    assert McpConfig().resolved_token_backend == "file"
+    assert McpConfig(token_gpg_key_id="ABCD!").resolved_token_backend == "gpg"
+    assert McpConfig(token_gpg_key_id="ABCD!").token_is_encrypted is True
+
+
+def test_a_keyring_token_keeps_no_file():
+    from davpunk.config import McpConfig
+
+    config = McpConfig(token_backend="keyring")
+    assert config.token_is_encrypted is True
+    assert config.token_path().name == "mcp-token"  # named, but never written
+
+
+def test_a_token_backend_and_a_key_id_must_agree():
+    import pytest as _pytest
+
+    from davpunk.config import McpConfig
+
+    with _pytest.raises(ValueError, match="token_gpg_key_id"):
+        McpConfig(token_backend="gpg")
+    with _pytest.raises(ValueError, match="encrypt nothing"):
+        McpConfig(token_backend="keyring", token_gpg_key_id="ABCD!")
