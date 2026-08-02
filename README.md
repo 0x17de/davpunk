@@ -340,6 +340,30 @@ right-click menu and takes a multiple selection, and through the task editor's
 **Status** field — which offers **(no status)** as a real choice, since that is
 what puts a task back in the "To Do" pool.
 
+### Folding a column
+
+Deleting a column is the heavy version of "I do not want to look at this", and
+it takes the drop target with it — there is then nowhere to *put* a finished
+card. Clicking a column's name folds it instead: it collapses to a strip of its
+own name and count, gives its width to the columns you are working in, and goes
+on accepting drops. Click it again to bring it back.
+
+Start it that way with `folded`:
+
+```toml
+[davpunk.kanban]
+columns = [
+  {id = "todo",        label = "To Do"                                              },
+  {id = "needsaction", label = "Needs Action", status = "NEEDS-ACTION"              },
+  {id = "inprogress",  label = "In Progress",  status = "IN-PROCESS"                },
+  {id = "done",        label = "Done",         status = "COMPLETED", folded = true  },
+  {id = "cancelled",   label = "Cancelled",    status = "CANCELLED", folded = true  },
+]
+```
+
+That is the starting state only. Folding and unfolding during a session is not
+written back, the same as *show completed* below.
+
 ### Finished work
 
 Completed and cancelled tasks are hidden by default, in the list *and* on the

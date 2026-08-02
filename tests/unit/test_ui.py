@@ -1185,6 +1185,99 @@ def test_a_column_a_status_has_no_lane_for_is_not_silently_swallowed(
 # ---------------------------------------------------------- column headers
 
 
+def _click_header(header) -> None:
+    """A press and release on a column name, the way a mouse delivers it."""
+    from PySide6.QtCore import QEvent, QPointF
+    from PySide6.QtGui import QMouseEvent
+
+    for kind in (QEvent.Type.MouseButtonPress, QEvent.Type.MouseButtonRelease):
+        header.event(
+            QMouseEvent(
+                kind,
+                QPointF(1, 1),
+                Qt.MouseButton.LeftButton,
+                Qt.MouseButton.LeftButton,
+                Qt.KeyboardModifier.NoModifier,
+            )
+        )
+
+
+def test_clicking_a_column_name_folds_the_column_away(window, make_task):
+    """Done and Cancelled are two fifths of the board and almost none of the
+    work; dropping them from the config takes the drop target with them."""
+    cache.create_task_local(make_task("d", status=Status.COMPLETED), window.conn)
+    kanban = _kanban(window)
+    kanban.set_show_completed(True)
+    assert not kanban.lists["done"].isHidden()
+
+    _click_header(kanban.headers["done"])
+
+    assert kanban.folded_columns == {"done"}
+    assert kanban.lists["done"].isHidden()
+    # A column you cannot see is one you forget, so the count stays on screen.
+    assert "(1)" in kanban.headers["done"].text()
+
+    _click_header(kanban.headers["done"])
+    assert not kanban.lists["done"].isHidden()
+
+
+def test_a_folded_column_survives_a_refresh(window, make_task):
+    """The poll timer refreshes on its own; unfolding there would be a column
+    reopening itself while nobody is touching anything."""
+    kanban = _kanban(window)
+    kanban.set_column_folded("cancelled", True)
+
+    kanban.refresh()
+
+    assert kanban.lists["cancelled"].isHidden()
+    assert "(0)" in kanban.headers["cancelled"].text()
+
+
+def test_a_folded_column_is_still_a_drop_target(window, make_task):
+    """Folding it is not dropping it: the point is to keep somewhere to put
+    finished work without giving it half the board."""
+    cache.create_task_local(make_task("c"), window.conn)
+    kanban = _kanban(window)
+    card = _task(kanban.lists["needsaction"], "c")
+    kanban.set_column_folded("done", True)
+
+    assert kanban.headers["done"].acceptDrops()
+    kanban.headers["done"].dropped.emit([card])
+
+    assert _reload(window, card).status is Status.COMPLETED
+    assert kanban.lists["done"].isHidden()  # and it stays out of the way
+
+
+def test_a_column_can_start_folded_from_the_config(qapp, conn, calendar_id, db_path):
+    from davpunk.config import KanbanColumn, KanbanConfig
+    from davpunk.ui.main_window import MainWindow
+
+    columns = [
+        KanbanColumn(id="todo", label="To Do", status=None),
+        KanbanColumn(id="done", label="Done", status="COMPLETED", folded=True),
+    ]
+    win = MainWindow(DavPunkConfig(kanban=KanbanConfig(columns=columns)), conn, db_path)
+    try:
+        assert win.kanban_view.lists["done"].isHidden()
+        assert not win.kanban_view.lists["todo"].isHidden()
+    finally:
+        win.sync.stop()
+        win._poll.stop()
+
+
+def test_a_card_in_a_folded_column_is_not_what_the_menu_acts_on(window, make_task):
+    """Its rows stay selected from before it was folded, and "the card the
+    user can still see" is the whole basis of that fallback."""
+    cache.create_task_local(make_task("c"), window.conn)
+    kanban = _kanban(window)
+    column = kanban.lists["needsaction"]
+    column.setCurrentItem(_find(column, "c"))
+    assert window.selected_task() is not None
+
+    kanban.set_column_folded("needsaction", True)
+    assert window.selected_task() is None
+
+
 def test_a_column_header_is_a_drop_target(window):
     """Aiming at the word "Done" beats aiming at the empty space under the
     last card — which in a full column is not on screen at all."""

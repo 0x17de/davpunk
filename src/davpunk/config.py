@@ -109,6 +109,13 @@ class KanbanColumn(BaseModel):
     #: NEEDS-ACTION, and the distinction between a pool to pick from and work
     #: that has been picked.  Dropping a card there clears STATUS.
     status: str | None = None
+    #: Start collapsed to a strip of its own name and count.  Done and
+    #: Cancelled are the reason this exists: they are worth keeping as drop
+    #: targets and worth counting, and worth almost none of the width they
+    #: take up.  A startup default only — clicking a column name folds and
+    #: unfolds it, and that is not written back, the same way "show
+    #: completed" is not.
+    folded: bool = False
 
 
 class KanbanConfig(BaseModel):

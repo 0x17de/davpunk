@@ -571,7 +571,7 @@ _HEADER_STYLES = {
 
 
 class _ColumnHeader(QLabel):
-    """The column's name, and a drop target in its own right.
+    """The column's name, its drop target, and its fold handle.
 
     Aiming at the word "Done" is a much bigger target than the empty space
     under the last card — which in a full column is not on screen at all.  A
@@ -581,15 +581,35 @@ class _ColumnHeader(QLabel):
     That target is invisible until you have already found it, so a drag arms
     every header and the one under the cursor fills in.  A drop target nobody
     can see is a feature only its author uses.
+
+    Clicking it folds the column — see :meth:`KanbanView.toggle_column`.  The
+    name is the one part of a folded column still on screen, so it is also the
+    only thing left to click to get it back.
     """
 
     #: ``(dragged tasks,)`` — the column is implied by which header it is.
     dropped = Signal(object)
+    clicked = Signal()
 
     def __init__(self, text: str, parent=None) -> None:
         super().__init__(text, parent)
         self.setAcceptDrops(True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.set_drop_state("rest")
+
+    def mousePressEvent(self, event) -> None:
+        # A QLabel ignores presses, and Qt then delivers the release to
+        # whatever is behind it — so there would be no click at all.
+        event.accept()
+
+    def mouseReleaseEvent(self, event) -> None:
+        """A press and release on the name, the way a button behaves: dragging
+        off it before letting go is how you change your mind."""
+        if event.button() == Qt.MouseButton.LeftButton and self.rect().contains(
+            event.position().toPoint()
+        ):
+            self.clicked.emit()
+        event.accept()
 
     def set_drop_state(self, state: str) -> None:
         self.drop_state = state
@@ -644,21 +664,27 @@ class KanbanView(QWidget):
         outer.addWidget(self.filter_bar)
 
         board = QWidget()
-        layout = QHBoxLayout(board)
+        layout = self._board = QHBoxLayout(board)
         layout.setContentsMargins(0, 0, 0, 0)
         outer.addWidget(board, 1)
         self.folds = vm.FoldState()
         self._building = False
         self.lists: dict[str, _ColumnTree] = {}
         self.headers: dict[str, _ColumnHeader] = {}
+        self._boxes: dict[str, QVBoxLayout] = {}
+        self._counts: dict[str, int] = {column.id: 0 for column in self.columns}
+        #: Collapsed to a strip of name and count.  Runtime state, seeded from
+        #: the config the way ``show_completed`` is.
+        self.folded_columns: set[str] = {c.id for c in self.columns if c.folded}
         for column in self.columns:
             box = QVBoxLayout()
-            header = _ColumnHeader(f"<b>{column.label}</b>")
+            header = _ColumnHeader("")
             # Dropping on the name is the same as dropping in the column, and
             # a much easier thing to aim at.
             header.dropped.connect(
                 lambda tasks, column_id=column.id: self._on_drop(column_id, tasks, None)
             )
+            header.clicked.connect(lambda column_id=column.id: self.toggle_column(column_id))
             self.headers[column.id] = header
             box.addWidget(header)
             widget = _ColumnTree()
@@ -674,9 +700,67 @@ class KanbanView(QWidget):
                     column_id, tasks, onto, position
                 )
             )
-            box.addWidget(widget)
+            box.addWidget(widget, 1)
+            # Takes the height the cards leave behind when the column is
+            # folded, so its name stays level with every other one instead of
+            # drifting into the middle of an empty strip.
+            box.addStretch(0)
             self.lists[column.id] = widget
+            self._boxes[column.id] = box
             layout.addLayout(box)
+
+        for column in self.columns:
+            self._apply_fold(column.id)
+        self._paint_headers()
+
+    # ---------------------------------------------------------- folded columns
+
+    def toggle_column(self, column_id: str) -> None:
+        self.set_column_folded(column_id, column_id not in self.folded_columns)
+
+    def set_column_folded(self, column_id: str, folded: bool) -> None:
+        """Collapse a column to a strip of its own name and count.
+
+        Done and Cancelled are what this is for: a board that keeps them is
+        two fifths finished work, and the alternative on offer — dropping the
+        columns from the config — takes the drop target away with them, so
+        there is no way left to *put* anything there.  Folded, they are still
+        a target, still counted, and no longer half the board.
+
+        The count is the part that has to survive folding.  A column you
+        cannot see is one you will forget, and "Done (12)" is the difference
+        between out of the way and out of mind.
+        """
+        if column_id not in self.lists:
+            return
+        self.folded_columns.discard(column_id)
+        if folded:
+            self.folded_columns.add(column_id)
+        self._apply_fold(column_id)
+        self._paint_headers()
+
+    def _apply_fold(self, column_id: str) -> None:
+        folded = column_id in self.folded_columns
+        self.lists[column_id].setHidden(folded)
+        box = self._boxes[column_id]
+        # The trailing spacer only earns its keep once the cards are gone.
+        box.setStretch(box.count() - 1, 1 if folded else 0)
+        # Without this the folded column keeps its equal share of the width and
+        # nothing is won.  One box per column, added in order, so a column's
+        # place in the board is its place in `_boxes`.
+        self._board.setStretch(list(self._boxes).index(column_id), 0 if folded else 1)
+
+    def _paint_headers(self) -> None:
+        """The name, the marker and the count, for folded and open alike."""
+        for column in self.columns:
+            folded = column.id in self.folded_columns
+            marker = "▸" if folded else "▾"
+            header = self.headers[column.id]
+            header.setText(f"{marker} <b>{column.label}</b>  ({self._counts.get(column.id, 0)})")
+            header.setToolTip(
+                f"Click to {'unfold' if folded else 'fold'} this column.\n"
+                "Cards can still be dropped on the name either way."
+            )
 
     def _arm_headers(self) -> None:
         for header in self.headers.values():
@@ -822,8 +906,8 @@ class KanbanView(QWidget):
         }
 
     def _update_counts(self, board: dict, shown: int, total: int, stranded: int) -> None:
-        for column in self.columns:
-            self.headers[column.id].setText(f"<b>{column.label}</b>  ({len(board[column.id])})")
+        self._counts = {column.id: len(board[column.id]) for column in self.columns}
+        self._paint_headers()
 
         if self.filter.is_active:
             self.filter_bar.summary.setText(
@@ -855,11 +939,18 @@ class KanbanView(QWidget):
         a card the user can still see selected is the one they are acting on —
         without the fallback, every menu-driven action on the board silently
         does nothing.
+
+        A folded column is skipped: its rows are still selected from before it
+        was folded, and "a card the user can still see" is the whole basis of
+        the fallback.  ``isHidden`` rather than ``isVisible`` — the latter is
+        false for the entire board whenever another view is on top.
         """
         for widget in self.lists.values():
             if widget.hasFocus():
                 return widget
-        return next((w for w in self.lists.values() if w.selectedItems()), None)
+        return next(
+            (w for w in self.lists.values() if not w.isHidden() and w.selectedItems()), None
+        )
 
     def selected_task(self) -> Task | None:
         widget = self._focused_list()

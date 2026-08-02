@@ -1371,12 +1371,15 @@ verify_tls     = true
 # A status with no column here is not shown on the board — that is how you drop
 # Done and Cancelled without losing the states, which stay reachable through
 # Edit → Change status.
+# folded starts a column collapsed to a strip of its name and count, still a
+# drop target.  A startup default: clicking a column name folds and unfolds it,
+# and that is not written back.
 columns = [
   {id = "todo",        label = "To Do"                                   },
   {id = "needsaction", label = "Needs Action", status = "NEEDS-ACTION"   },
   {id = "inprogress",  label = "In Progress",  status = "IN-PROCESS"     },
-  {id = "done",        label = "Done",         status = "COMPLETED"      },
-  {id = "cancelled",   label = "Cancelled",    status = "CANCELLED"      },
+  {id = "done",        label = "Done",         status = "COMPLETED", folded = false },
+  {id = "cancelled",   label = "Cancelled",    status = "CANCELLED", folded = false },
 ]
 
 [davpunk.keys]                            # overrides; duplicates are an error
