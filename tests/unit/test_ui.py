@@ -334,9 +334,9 @@ def test_a_subtask_the_board_is_not_showing_does_not_come_back_as_context(window
     assert _find(kanban.lists["needsaction"], "auto").childCount() == 0
 
 
-def test_a_context_row_is_not_a_row_you_can_act_on(window, make_task):
-    """It carries no task, so every handler already refuses it — the same way
-    a bucket heading is refused."""
+def test_a_context_row_is_not_a_row_you_can_drag_or_tick(window, make_task):
+    """The gestures that mean "this row, in this column" stay refused: it
+    carries no TASK_ROLE, which is what every one of them reads."""
     from davpunk.ui.views import TASK_ROLE
 
     cache.create_task_local(make_task("p", status=Status.IN_PROCESS), window.conn)
@@ -345,10 +345,79 @@ def test_a_context_row_is_not_a_row_you_can_act_on(window, make_task):
 
     context = kanban.lists["needsaction"].topLevelItem(0)
     assert context.data(0, TASK_ROLE) is None
-    assert not context.flags() & Qt.ItemFlag.ItemIsSelectable
     assert not context.flags() & Qt.ItemFlag.ItemIsDragEnabled
+    assert not context.flags() & Qt.ItemFlag.ItemIsUserCheckable
     # Open, or the child it exists to explain would start out hidden.
     assert context.isExpanded()
+
+
+def test_the_menu_on_a_grey_row_acts_on_the_task_it_stands_in_for(window, make_task):
+    """ "New subtask" and "Change status" name the task, not the row, and there
+    is only one task they can mean.  Refusing them here would only mean
+    walking to another column to do the obvious thing."""
+    cache.create_task_local(make_task("p", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    column = kanban.lists["needsaction"]
+    column.setCurrentItem(column.topLevelItem(0))  # the grey stand-in for "p"
+
+    assert window.selected_task().uid == "p"
+    assert [t.uid for t in window.selected_tasks()] == ["p"]
+    menu = window.context_menu_for(window.selected_task())
+    entries = {a.text(): a.isEnabled() for a in menu.actions()}
+    assert entries["New subtask"] and entries["Change status"]
+
+
+def test_a_subtask_added_from_a_grey_row_lands_under_the_real_task(window, make_task, monkeypatch):
+    cache.create_task_local(make_task("auto", summary="auto"), window.conn)
+    cache.create_task_local(
+        make_task("lack", summary="lack außen", parent_uid="auto", status=Status.IN_PROCESS),
+        window.conn,
+    )
+    kanban = _kanban(window)
+
+    grey = _find(kanban.lists["needsaction"], "auto").child(0)
+    kanban.lists["needsaction"].setCurrentItem(grey)
+
+    _accept_editor(monkeypatch, lambda e: e.summary.setText("Polieren"))
+    window.new_subtask()
+
+    row = window.conn.execute("SELECT parent_uid FROM tasks WHERE summary = 'Polieren'").fetchone()
+    assert row["parent_uid"] == "lack"
+
+
+def test_a_status_chosen_on_a_grey_row_moves_the_real_card(window, make_task):
+    cache.create_task_local(make_task("p", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    column = kanban.lists["needsaction"]
+    column.setCurrentItem(column.topLevelItem(0))
+    window.set_status(Status.CANCELLED)
+
+    assert window.conn.execute("SELECT status FROM tasks WHERE uid = 'p'").fetchone()[0] == (
+        Status.CANCELLED.value
+    )
+
+
+def test_a_refresh_leaves_the_selection_on_the_grey_row(window, make_task):
+    """The task is on the board twice.  Restoring the selection by task rather
+    than by row would walk it over to the other copy — on the poll timer, with
+    nobody touching anything."""
+    from davpunk.ui.views import TASK_ROLE
+
+    cache.create_task_local(make_task("p", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    column = kanban.lists["needsaction"]
+    column.setCurrentItem(column.topLevelItem(0))
+    kanban.refresh()
+
+    current = column.currentItem()
+    assert current.data(0, TASK_ROLE) is None  # still the grey one
+    assert current.isSelected()
 
 
 def test_a_context_row_appears_in_the_list_view_too(window, make_task):

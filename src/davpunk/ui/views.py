@@ -37,6 +37,11 @@ TASK_ROLE = Qt.ItemDataRole.UserRole
 #: The identity a fold is remembered under.  Separate from TASK_ROLE because
 #: bucket headings fold too and have no task behind them.
 FOLD_ROLE = Qt.ItemDataRole.UserRole + 1
+#: The task a grey context row stands in for.  Deliberately not TASK_ROLE:
+#: that role means "a row of this slice's own", and drags, drops, ticks and
+#: fold defaults all key off it.  Menu actions read this one as well —
+#: see :func:`task_of`.
+CONTEXT_ROLE = Qt.ItemDataRole.UserRole + 2
 
 #: Qt's drop indicator, in the viewmodel's terms.  ``OnViewport`` is absent on
 #: purpose: a drop into empty space has no target, and falls through to ON with
@@ -54,20 +59,30 @@ def fold_key(task: Task) -> tuple:
 
 
 def context_item(task: Task) -> QTreeWidgetItem:
-    """An ancestor this view is not showing, drawn as grey scaffolding.
+    """A relative this view is not showing here, drawn as grey scaffolding.
 
-    It carries no ``TASK_ROLE`` and none of the interaction flags on purpose:
-    selecting, dragging or ticking it would act on a task that is not one of
-    the rows here, and every handler in this module decides what it is looking
-    at by asking a row for its task.  A row with no task is already refused
-    everywhere — a bucket heading is the same shape.
+    It carries no ``TASK_ROLE``: the gestures that mean "this row, here" —
+    dragging it, ticking it, dropping onto it — would be claims about a slice
+    the task is not in, and every handler in this module refuses a row with no
+    task already, the same way it refuses a bucket heading.
+
+    The menu is the other kind of gesture.  "New subtask", "Change status",
+    "Open" name the *task*, not the row, and there is exactly one task they
+    can mean; refusing them here would only mean walking to another column to
+    do the obvious thing.  So the row is selectable and carries its task under
+    ``CONTEXT_ROLE``, and every action reads it through :func:`task_of`.
     """
     item = QTreeWidgetItem([task.summary or "(no summary)"])
     # Its own fold key: closing the real row in the column it lives in has
     # nothing to do with closing the grey stand-in over here.
     item.setData(0, FOLD_ROLE, ("context", task.calendar_id, task.uid))
-    item.setFlags(Qt.ItemFlag.ItemIsEnabled)
-    item.setToolTip(0, "Shown for context — this task itself is not among these rows.")
+    item.setData(0, CONTEXT_ROLE, task)
+    item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+    item.setToolTip(
+        0,
+        "Shown for context — this task itself is not among these rows.\n"
+        "The right-click menu still acts on it.",
+    )
 
     grey = QApplication.palette().brush(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText)
     item.setForeground(0, QBrush(grey))
@@ -101,9 +116,32 @@ def task_item(node: vm.TreeNode) -> QTreeWidgetItem:
     return item
 
 
+def task_of(item) -> Task | None:
+    """The task a row *acts on*: its own, or the one it stands in for.
+
+    This is what every menu-driven action asks, and the only place the two
+    roles are treated alike.  Everything that means "this row, in this slice"
+    keeps reading ``TASK_ROLE`` directly and keeps refusing a grey row.
+    """
+    if item is None:
+        return None
+    task = item.data(0, TASK_ROLE)
+    return task if task is not None else item.data(0, CONTEXT_ROLE)
+
+
 def _tasks_of(items) -> list[Task]:
-    """The tasks behind a selection, headings dropped."""
+    """The tasks a drag carries: this slice's own rows, headings dropped."""
     found = (item.data(0, TASK_ROLE) for item in items)
+    return [task for task in found if task is not None]
+
+
+def _acting_tasks(items) -> list[Task]:
+    """The tasks a menu acts on, grey stand-ins included.
+
+    A task cannot be both a row of its own and a grey stand-in inside one
+    tree, so this cannot hand the same task to an action twice.
+    """
+    found = (task_of(item) for item in items)
     return [task for task in found if task is not None]
 
 
@@ -209,6 +247,27 @@ def _walk(tree: QTreeWidget):
         stack.extend(item.child(i) for i in range(item.childCount()))
 
 
+def current_row_key(tree: QTreeWidget):
+    """Which *row* is current, not which task.
+
+    A refresh rebuilds every row, so the selection has to be found again
+    afterwards — and a task can be on screen twice, as its own card and as a
+    grey stand-in under a parent in another column.  Restoring by task would
+    quietly move the selection to the other one of the two, on a timer.
+    ``FOLD_ROLE`` already distinguishes them, so it is the identity used here.
+    """
+    item = tree.currentItem()
+    return item.data(0, FOLD_ROLE) if item is not None else None
+
+
+def select_row_key(tree: QTreeWidget, key) -> bool:
+    for item in _walk(tree):
+        if item.data(0, FOLD_ROLE) == key:
+            tree.setCurrentItem(item)
+            return True
+    return False
+
+
 def apply_folds(tree: QTreeWidget, folds: vm.FoldState) -> None:
     """Restore the remembered folds, *after* the rows are in the widget.
 
@@ -289,7 +348,7 @@ class ListView(QWidget):
         self._arm_midnight()
 
     def refresh(self) -> None:
-        selected = self.selected_task()
+        selected = current_row_key(self.tree)
         self._building = True
         try:
             self.tree.clear()
@@ -316,7 +375,7 @@ class ListView(QWidget):
             self._building = False
 
         if selected is not None:
-            self.select_uid(selected.uid)
+            select_row_key(self.tree, selected)
 
     def _node_item(self, node: vm.TreeNode) -> QTreeWidgetItem:
         item = task_item(node)
@@ -350,11 +409,10 @@ class ListView(QWidget):
     # ------------------------------------------------------------- selection
 
     def selected_task(self) -> Task | None:
-        item = self.tree.currentItem()
-        return item.data(0, TASK_ROLE) if item is not None else None
+        return task_of(self.tree.currentItem())
 
     def selected_tasks(self) -> list[Task]:
-        return _tasks_of(self.tree.selectedItems())
+        return _acting_tasks(self.tree.selectedItems())
 
     def select_uid(self, uid: str) -> bool:
         for index in range(self.tree.topLevelItemCount()):
@@ -370,7 +428,7 @@ class ListView(QWidget):
         return any(self._select_in(item.child(i), uid) for i in range(item.childCount()))
 
     def _activated(self, item: QTreeWidgetItem, _column: int) -> None:
-        task = item.data(0, TASK_ROLE)
+        task = task_of(item)
         if task is not None:
             self.taskActivated.emit(task)
 
@@ -640,7 +698,8 @@ class KanbanView(QWidget):
         # Every card on the board, so a column can also show the subtasks that
         # went to *other* columns — greyed, but not gone.
         on_board = [task for cards in board.values() for task in cards]
-        selected = self.selected_task()
+        focused = self._focused_list()
+        selected = current_row_key(focused) if focused is not None else None
         shown = 0
         self._building = True
         try:
@@ -656,7 +715,7 @@ class KanbanView(QWidget):
         finally:
             self._building = False
         if selected is not None:
-            self.select_uid(selected)
+            self._select_row_key(selected)
         stranded = sum(
             1 for t in vm.apply_filter(tasks, self.filter) if vm.column_of(t, self.columns) is None
         )
@@ -695,6 +754,11 @@ class KanbanView(QWidget):
                     widget.setCurrentItem(item)
                     return True
         return False
+
+    def _select_row_key(self, key) -> bool:
+        """The row itself, in whichever column it was — see
+        :func:`current_row_key`."""
+        return any(select_row_key(widget, key) for widget in self.lists.values())
 
     def _on_drop(
         self,
@@ -780,7 +844,7 @@ class KanbanView(QWidget):
         self.refresh()
 
     def _activated(self, item: QTreeWidgetItem, _column: int = 0) -> None:
-        task = item.data(0, TASK_ROLE)
+        task = task_of(item)
         if task is not None:
             self.taskActivated.emit(task)
 
@@ -799,12 +863,11 @@ class KanbanView(QWidget):
 
     def selected_task(self) -> Task | None:
         widget = self._focused_list()
-        item = widget.currentItem() if widget is not None else None
-        return item.data(0, TASK_ROLE) if item is not None else None
+        return task_of(widget.currentItem()) if widget is not None else None
 
     def selected_tasks(self) -> list[Task]:
         widget = self._focused_list()
-        return _tasks_of(widget.selectedItems()) if widget is not None else []
+        return _acting_tasks(widget.selectedItems()) if widget is not None else []
 
     def move_to_column(self, task: Task, column_id: str) -> None:
         """Sets both STATUS and X-DAVPUNK-KANBAN-COL in one update."""
