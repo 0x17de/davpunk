@@ -637,6 +637,9 @@ class KanbanView(QWidget):
 
         visible = tasks if self.show_completed else [t for t in tasks if not vm.is_finished(t)]
         board = vm.kanban_board(visible, self.columns, self.filter)
+        # Every card on the board, so a column can also show the subtasks that
+        # went to *other* columns — greyed, but not gone.
+        on_board = [task for cards in board.values() for task in cards]
         selected = self.selected_task()
         shown = 0
         self._building = True
@@ -646,7 +649,7 @@ class KanbanView(QWidget):
                 # A column is a slice, so the tree builder gets the whole set:
                 # a card whose parent sits in another column arrives with that
                 # parent as a grey context row, not as a root of its own.
-                for node in vm.build_tree(board[column_id], tasks):
+                for node in vm.build_tree(board[column_id], tasks, on_board):
                     widget.addTopLevelItem(self._node_item(node))
                 apply_folds(widget, self.folds)
                 shown += len(board[column_id])

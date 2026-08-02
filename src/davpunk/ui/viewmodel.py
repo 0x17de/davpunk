@@ -307,13 +307,18 @@ class TreeNode:
     #: A RELATED-TO pointing outside this calendar; rendered at root with a
     #: marker and preserved in the ICS.
     linked_parent_elsewhere: bool = False
-    #: Not one of the tasks this view is showing: an ancestor pulled in from
-    #: the universe so its subtasks are not stranded at the root.  Rendered
-    #: grey and inert — it is context, not a row you can act on.
+    #: Not one of the tasks in this slice: a relative pulled in so the shape of
+    #: the tree survives the slicing — an ancestor above, or a subtask that
+    #: lives in another slice below.  Rendered grey and inert: it is context,
+    #: not a row you can act on.
     is_context: bool = False
 
 
-def build_tree(tasks: list[Task], universe: list[Task] | None = None) -> list[TreeNode]:
+def build_tree(
+    tasks: list[Task],
+    universe: list[Task] | None = None,
+    shown: list[Task] | None = None,
+) -> list[TreeNode]:
     """Roots first, children nested, with a visited set and a depth cap.
 
     Parent resolution is **within one calendar only** — ``uid`` is deliberately
@@ -332,6 +337,20 @@ def build_tree(tasks: list[Task], universe: list[Task] | None = None) -> list[Tr
     hangs under — is exactly what the slice threw away.  The chain stops at the
     first ancestor the slice already shows, so a parent in this column and a
     grandparent in another nest the way they look.
+
+    ``shown`` is every task this *view* has on screen, across all its slices,
+    and turns the same idea downwards: a subtask that went to another slice is
+    pulled back under its parent as a context node instead of vanishing from
+    under it.  A parent in Needs Action whose one subtask is In Progress
+    otherwise looks like a parent with no subtasks at all, which is exactly
+    backwards — it is the only one of the two that is *not* finished with.
+    Grey and inert here, live in the slice it actually belongs to.
+
+    It is deliberately a separate list from ``universe``: only what the view
+    already shows somewhere may be pulled back in.  Drawing on the universe
+    instead would put completed subtasks back under their parents the moment
+    "show completed" was turned off, and let a filtered-out task through — the
+    two controls whose whole job is to take rows away.
     """
     in_slice: dict[tuple[str | None, str], Task] = {
         (task.calendar_id, task.uid): task for task in tasks
@@ -345,6 +364,10 @@ def build_tree(tasks: list[Task], universe: list[Task] | None = None) -> list[Tr
     roots: list[Task] = []
     orphans: set[str] = set()
     context: dict[tuple[str | None, str], Task] = {}
+    elsewhere: dict[tuple[str | None, str], list[Task]] = {}
+    for task in shown or ():
+        if task.parent_uid:
+            elsewhere.setdefault((task.calendar_id, task.parent_uid), []).append(task)
 
     def pull_in(task: Task) -> None:
         """Hang ``task`` off its ancestors, adding the ones this slice lacks."""
@@ -367,6 +390,30 @@ def build_tree(tasks: list[Task], universe: list[Task] | None = None) -> list[Tr
             seen.add(key)
             task, parent_uid = parent, parent.parent_uid
 
+    def pull_down(task: Task) -> None:
+        """Hang the subtasks that went to other slices under ``task``, greyed.
+
+        Only under rows this slice actually has: a context ancestor keeps just
+        the children that brought it here.  Pulling *its* siblings' subtrees in
+        too would end with every column drawing the whole tree in grey, which
+        is the tree view, not a board.
+        """
+        stack = [(task, 0)]
+        while stack:
+            parent, depth = stack.pop()
+            if depth >= DEPTH_CAP:
+                continue
+            key = (parent.calendar_id, parent.uid)
+            for child in elsewhere.get(key, ()):
+                child_key = (child.calendar_id, child.uid)
+                # Already placed — as a row of its own, or as scaffolding the
+                # walk up put there.  This is also what ends a cycle.
+                if child_key in in_slice or child_key in context:
+                    continue
+                context[child_key] = child
+                children.setdefault(key, []).append(child)
+                stack.append((child, depth + 1))
+
     for task in tasks:
         key = (task.calendar_id, task.parent_uid) if task.parent_uid else None
         if key is None:
@@ -378,6 +425,11 @@ def build_tree(tasks: list[Task], universe: list[Task] | None = None) -> list[Tr
         else:
             orphans.add(task.uid)
             roots.append(task)
+
+    # After the walk up, so an ancestor already pulled in is not pulled in a
+    # second time as somebody's child.
+    for task in tasks:
+        pull_down(task)
 
     def walk(task: Task, depth: int, visited: set[str]) -> TreeNode:
         node = TreeNode(

@@ -301,6 +301,39 @@ def test_a_parent_in_another_column_comes_along_greyed_out(window, make_task):
     assert _find(kanban.lists["inprogress"], "p") is not None
 
 
+def test_a_subtask_in_another_column_stays_under_its_parent_greyed_out(window, make_task):
+    """A parent whose only subtask has moved on read as a card with nothing
+    under it — the opposite of what the board was being asked."""
+    from davpunk.ui.views import TASK_ROLE
+
+    cache.create_task_local(make_task("auto", summary="auto"), window.conn)
+    cache.create_task_local(
+        make_task("lack", summary="lack außen", parent_uid="auto", status=Status.IN_PROCESS),
+        window.conn,
+    )
+    kanban = _kanban(window)
+
+    parent = _find(kanban.lists["needsaction"], "auto")
+    assert parent.childCount() == 1
+    assert parent.child(0).text(0) == "lack außen"
+    assert parent.child(0).data(0, TASK_ROLE) is None  # grey and inert
+    # Still a card of its own in the column it actually belongs to.
+    assert _find(kanban.lists["inprogress"], "lack") is not None
+
+
+def test_a_subtask_the_board_is_not_showing_does_not_come_back_as_context(window, make_task):
+    """Hiding completed work takes rows away; context must not put them back."""
+    cache.create_task_local(make_task("auto", summary="auto"), window.conn)
+    cache.create_task_local(
+        make_task("lack", summary="lack außen", parent_uid="auto", status=Status.COMPLETED),
+        window.conn,
+    )
+    kanban = _kanban(window)
+    kanban.set_show_completed(False)
+
+    assert _find(kanban.lists["needsaction"], "auto").childCount() == 0
+
+
 def test_a_context_row_is_not_a_row_you_can_act_on(window, make_task):
     """It carries no task, so every handler already refuses it — the same way
     a bucket heading is refused."""

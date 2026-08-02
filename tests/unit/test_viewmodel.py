@@ -405,6 +405,71 @@ def test_without_a_universe_the_slice_is_the_universe():
     assert node.linked_parent_elsewhere
 
 
+def test_a_subtask_in_another_slice_stays_under_its_parent_as_context():
+    """The card "auto" is in Needs Action, its subtask "lack außen" In Progress.
+
+    Needs Action must still show the subtask, greyed: a parent whose only
+    subtask moved on otherwise reads as a parent with nothing under it — the
+    opposite of the truth."""
+    parent = task("auto")
+    child = task("lack", parent_uid="auto")
+    [root] = vm.build_tree([parent], universe=[parent, child], shown=[parent, child])
+
+    assert (root.task.uid, root.is_context) == ("auto", False)
+    assert [(n.task.uid, n.is_context) for n in root.children] == [("lack", True)]
+
+
+def test_the_same_subtask_is_a_real_row_in_its_own_slice():
+    """The grey copy is a second rendering, not a move: the column the subtask
+    actually belongs to still owns it."""
+    parent = task("auto")
+    child = task("lack", parent_uid="auto")
+    [root] = vm.build_tree([child], universe=[parent, child], shown=[parent, child])
+
+    assert (root.task.uid, root.is_context) == ("auto", True)
+    assert [(n.task.uid, n.is_context) for n in root.children] == [("lack", False)]
+
+
+def test_a_whole_subtree_in_other_slices_comes_down_greyed():
+    tasks = [task("p"), task("c", parent_uid="p"), task("g", parent_uid="c")]
+    [root] = vm.build_tree([tasks[0]], universe=tasks, shown=tasks)
+
+    assert [(n.task.uid, n.is_context) for n in vm.flatten([root])] == [
+        ("p", False),
+        ("c", True),
+        ("g", True),
+    ]
+
+
+def test_nothing_comes_down_that_the_view_is_not_showing_anyway():
+    """Hiding completed work and filtering both work by taking rows away;
+    pulling a subtask back in as context would quietly put them back."""
+    parent = task("p")
+    hidden = task("c", parent_uid="p")
+    [root] = vm.build_tree([parent], universe=[parent, hidden], shown=[parent])
+
+    assert root.children == []
+
+
+def test_a_context_ancestor_does_not_drag_the_rest_of_the_tree_along():
+    """It is here to explain one row, not to redraw the whole tree in grey."""
+    parent = task("p")
+    mine = task("a", parent_uid="p")
+    sibling = task("b", parent_uid="p")
+    roots = vm.build_tree([mine], universe=[parent, mine, sibling], shown=[parent, mine, sibling])
+
+    assert [n.task.uid for n in roots[0].children] == ["a"]
+
+
+def test_pulling_down_never_duplicates_a_row_already_placed():
+    """The walk up and the walk down meet in the middle: a parent pulled in as
+    an ancestor must not come back a second time as somebody's child."""
+    tasks = [task("g"), task("p", parent_uid="g"), task("c", parent_uid="p")]
+    [root] = vm.build_tree([tasks[0], tasks[2]], universe=tasks, shown=tasks)
+
+    assert [n.task.uid for n in vm.flatten([root])] == ["g", "p", "c"]
+
+
 def test_subtree_size_counts_every_descendant_not_just_children():
     tasks = [task("p"), task("c", parent_uid="p"), task("g", parent_uid="c")]
     [root] = vm.build_tree(tasks)
