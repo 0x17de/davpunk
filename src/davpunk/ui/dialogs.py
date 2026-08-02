@@ -67,8 +67,10 @@ class TaskEditor(QDialog):
         self.task = task
         self._original = task.model_copy(deep=True)
         self._tasks = list(tasks) if tasks is not None else []
+        self._creating = creating
         self.calendar: QComboBox | None = None
         self.parent_task: QComboBox | None = None
+        self.move_subtree: QCheckBox | None = None
 
         layout = QVBoxLayout(self)
         banner = _banner_for(task)
@@ -107,13 +109,36 @@ class TaskEditor(QDialog):
             index = combo.findData(task.calendar_id)
             if index >= 0:
                 combo.setCurrentIndex(index)
-            # Changing the list of an existing task is a PUT to the new
-            # collection and a DELETE from the old one, not a column write, so
-            # it belongs to the move dialog and its subtree question.
-            combo.setEnabled(creating)
             if not creating:
-                combo.setToolTip("Use “Move to another list” to change this.")
+                # Changing this is a PUT to the new collection and a DELETE
+                # from the old one rather than a column write, so the caller
+                # sends it through the move path.  It is still the same
+                # question the rest of this form asks — which list is this
+                # task in — and sending the user to a second dialog to answer
+                # it was the odd part.
+                combo.setToolTip(
+                    "Changing this moves the task: it is written to the new list "
+                    "and removed from the old one."
+                )
             self.calendar = combo
+
+        # Only where a move can leave something behind.  Parent links resolve
+        # within one calendar, so subtasks that stay put lose theirs — the same
+        # question the move dialog asks, and for the same reason.
+        if not creating and self.calendar is not None and self._has_children():
+            checkbox = QCheckBox("Move subtasks too")
+            checkbox.setChecked(True)
+            checkbox.setToolTip(
+                "Subtasks left behind become root tasks in the old list, "
+                "because a parent link only resolves within one calendar."
+            )
+            # Dead until the list actually changes: a live checkbox that does
+            # nothing is worse than one visibly not in play yet.
+            checkbox.setEnabled(False)
+            self.calendar.currentIndexChanged.connect(
+                lambda _index: checkbox.setEnabled(self.moved_to() is not None)
+            )
+            self.move_subtree = checkbox
 
         if tasks is not None:
             self.parent_task = QComboBox()
@@ -125,6 +150,8 @@ class TaskEditor(QDialog):
         form.addRow("Description", self.description)
         if self.calendar is not None:
             form.addRow("List", self.calendar)
+        if self.move_subtree is not None:
+            form.addRow("", self.move_subtree)
         if self.parent_task is not None:
             form.addRow("Parent", self.parent_task)
         form.addRow("Status", self.status)
@@ -160,7 +187,7 @@ class TaskEditor(QDialog):
                 self.categories,
                 self.location,
                 self.url,
-                *(w for w in (self.calendar, self.parent_task) if w is not None),
+                *(w for w in (self.calendar, self.parent_task, self.move_subtree) if w is not None),
             ]
             for widget in editable:
                 widget.setEnabled(False)
@@ -203,6 +230,31 @@ class TaskEditor(QDialog):
         if self.calendar is None:
             return self.task.calendar_id
         return self.calendar.currentData()
+
+    def moved_to(self) -> str | None:
+        """The list to move an existing task into, or ``None`` for staying put.
+
+        Deliberately not part of :meth:`changed_fields`: the other fields are
+        columns to write, and this one is a PUT to another collection and a
+        DELETE from this one.  A caller that mistook it for a column would
+        retarget the row without ever queueing the delete, and the task would
+        end up in both lists on the server.
+        """
+        if self._creating:
+            return None
+        chosen = self.calendar_id()
+        return chosen if chosen != self._original.calendar_id else None
+
+    def wants_subtree(self) -> bool:
+        """Whether a move takes the subtasks with it.  True when there are none
+        to ask about, which is what the move dialog defaults to as well."""
+        return self.move_subtree is None or self.move_subtree.isChecked()
+
+    def _has_children(self) -> bool:
+        return any(
+            t.calendar_id == self.task.calendar_id and t.parent_uid == self.task.uid
+            for t in self._tasks
+        )
 
     def changed_fields(self) -> dict[str, object]:
         """Only what actually changed — an update should not touch every column."""

@@ -1637,6 +1637,149 @@ def test_clearing_the_parent_in_the_editor_promotes_the_task(window, make_task, 
     assert cache.get_task_row(task_id, window.conn)["parent_uid"] is None
 
 
+# ----------------------------------------------------------- move by editor
+
+
+def _pick_list(target):
+    return lambda e: e.calendar.setCurrentIndex(e.calendar.findData(target))
+
+
+def _sync_clean(conn, task_id):
+    """Pretend the task has been pushed once.  A task that never reached a
+    server is moved by retargeting the row, which is not the path under test."""
+    with cache.tx(conn):
+        conn.execute(
+            "UPDATE tasks SET sync_state = ?, etag = '\"e1\"' WHERE id = ?",
+            (SyncState.CLEAN.value, task_id),
+        )
+        cache.clear_pending(task_id, conn)
+
+
+def test_changing_the_list_in_the_editor_moves_the_task(
+    window, make_task, monkeypatch, other_calendar_id
+):
+    task_id = cache.create_task_local(make_task("t"), window.conn)
+    window.refresh()
+
+    _accept_editor(monkeypatch, _pick_list(other_calendar_id))
+    window.open_editor(cache.get_task(task_id, window.conn))
+
+    assert cache.get_task_row(task_id, window.conn)["calendar_id"] == other_calendar_id
+
+
+def test_a_move_from_the_editor_goes_through_the_move_path(
+    window, make_task, monkeypatch, other_calendar_id
+):
+    """Not a column write: the queued change has to be the one that also
+    deletes the copy left behind, or the task ends up in both lists."""
+    task_id = cache.create_task_local(make_task("t"), window.conn)
+    _sync_clean(window.conn, task_id)
+    window.refresh()
+
+    _accept_editor(monkeypatch, _pick_list(other_calendar_id))
+    window.open_editor(cache.get_task(task_id, window.conn))
+
+    pending = window.conn.execute(
+        "SELECT change_type, source_calendar_id FROM pending_changes WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    assert pending["change_type"] == "move"
+    assert pending["source_calendar_id"] is not None
+
+
+def test_an_edit_and_a_move_together_keep_the_move(
+    window, make_task, monkeypatch, other_calendar_id, calendar_id
+):
+    """The field write goes first on purpose: an update landing on top of a
+    queued move rewrites it to a plain create, and the source copy survives."""
+    task_id = cache.create_task_local(make_task("t", summary="before"), window.conn)
+    _sync_clean(window.conn, task_id)
+    window.refresh()
+
+    def _fill(editor):
+        editor.summary.setText("after")
+        _pick_list(other_calendar_id)(editor)
+
+    _accept_editor(monkeypatch, _fill)
+    window.open_editor(cache.get_task(task_id, window.conn))
+
+    row = cache.get_task_row(task_id, window.conn)
+    assert (row["summary"], row["calendar_id"]) == ("after", other_calendar_id)
+    change = window.conn.execute(
+        "SELECT change_type FROM pending_changes WHERE task_id = ?", (task_id,)
+    ).fetchone()
+    assert change["change_type"] == "move"
+
+
+def test_the_editor_asks_about_subtasks_only_when_there_are_some(window, make_task, monkeypatch):
+    cache.create_task_local(make_task("lonely"), window.conn)
+    parent_id = cache.create_task_local(make_task("p"), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    window.refresh()
+
+    seen = {}
+    _accept_editor(monkeypatch, lambda e: seen.update({e.task.uid: e.move_subtree}))
+    window.open_editor(cache.get_task(parent_id, window.conn))
+    window.open_editor(_task(_list(window), "lonely"))
+
+    assert seen["p"] is not None
+    assert seen["lonely"] is None
+
+
+def test_the_subtask_question_is_dead_until_the_list_changes(
+    window, make_task, monkeypatch, other_calendar_id
+):
+    """A live checkbox that does nothing is worse than one visibly not in
+    play: nothing is being asked until the list actually moves."""
+    parent_id = cache.create_task_local(make_task("p"), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    window.refresh()
+
+    seen = {}
+
+    def _fill(editor):
+        seen["at_rest"] = editor.move_subtree.isEnabled()
+        _pick_list(other_calendar_id)(editor)
+        seen["after"] = editor.move_subtree.isEnabled()
+
+    _accept_editor(monkeypatch, _fill)
+    window.open_editor(cache.get_task(parent_id, window.conn))
+
+    assert seen == {"at_rest": False, "after": True}
+
+
+def test_leaving_the_subtasks_behind_promotes_them(
+    window, make_task, monkeypatch, other_calendar_id, calendar_id
+):
+    """Parent links resolve within one calendar, so a subtask that stays put
+    would otherwise hold a link to somewhere it cannot see."""
+    parent_id = cache.create_task_local(make_task("p"), window.conn)
+    child_id = cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    window.refresh()
+
+    def _fill(editor):
+        _pick_list(other_calendar_id)(editor)
+        editor.move_subtree.setChecked(False)
+
+    _accept_editor(monkeypatch, _fill)
+    window.open_editor(cache.get_task(parent_id, window.conn))
+
+    child = cache.get_task_row(child_id, window.conn)
+    assert child["calendar_id"] == calendar_id
+    assert child["parent_uid"] is None
+
+
+def test_the_subtasks_come_along_by_default(window, make_task, monkeypatch, other_calendar_id):
+    parent_id = cache.create_task_local(make_task("p"), window.conn)
+    child_id = cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    window.refresh()
+
+    _accept_editor(monkeypatch, _pick_list(other_calendar_id))
+    window.open_editor(cache.get_task(parent_id, window.conn))
+
+    assert cache.get_task_row(child_id, window.conn)["calendar_id"] == other_calendar_id
+    assert cache.get_task_row(child_id, window.conn)["parent_uid"] == "p"
+
+
 # -------------------------------------------------------------------- delete
 
 
@@ -2281,14 +2424,39 @@ def test_the_list_picker_starts_on_the_tasks_own_list(qapp, conn, calendar_id, m
     assert editor.calendar_id() == calendar_id
 
 
-def test_the_list_picker_is_read_only_when_editing(qapp, conn, make_task):
-    """Changing the list of a saved task is a PUT to the new collection and a
-    DELETE from the old one, so it belongs to the move dialog."""
+def test_the_list_picker_is_live_when_editing_too(qapp, conn, make_task):
+    """ "Which list is this in" is the same question the rest of the form asks;
+    sending the user to a second dialog to answer it was the odd part."""
     editing = TaskEditor(make_task("t"), calendars=cache.calendar_rows(conn))
     creating = TaskEditor(make_task("t"), calendars=cache.calendar_rows(conn), creating=True)
 
-    assert not editing.calendar.isEnabled()
+    assert editing.calendar.isEnabled()
     assert creating.calendar.isEnabled()
+
+
+def test_the_list_picker_reports_a_move_only_when_it_changed(
+    qapp, conn, make_task, calendar_id, other_calendar_id
+):
+    """A move is not a column write, so it is kept out of changed_fields()."""
+    editor = TaskEditor(make_task("t"), calendars=cache.calendar_rows(conn))
+    assert editor.moved_to() is None
+
+    editor.calendar.setCurrentIndex(editor.calendar.findData(other_calendar_id))
+    assert editor.moved_to() == other_calendar_id
+    assert "calendar_id" not in editor.changed_fields()
+
+    editor.calendar.setCurrentIndex(editor.calendar.findData(calendar_id))
+    assert editor.moved_to() is None
+
+
+def test_a_new_task_never_reports_a_move(qapp, conn, make_task, other_calendar_id):
+    """It is not anywhere yet: picking a list is where it is created, and a
+    move of a task that does not exist would queue a delete of nothing."""
+    editor = TaskEditor(make_task("t"), calendars=cache.calendar_rows(conn), creating=True)
+    editor.calendar.setCurrentIndex(editor.calendar.findData(other_calendar_id))
+
+    assert editor.moved_to() is None
+    assert editor.calendar_id() == other_calendar_id
 
 
 def test_an_unavailable_list_is_offered_only_to_the_task_already_in_it(

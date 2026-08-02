@@ -298,6 +298,15 @@ tasks have to share one list: a move is out of one list and into another, and
 the dialog's job is to offer everywhere except where you already are. A
 selection spanning two lists says so rather than guessing.
 
+For one task, the editor's **List** field does the same thing — which list a
+task is in is the same kind of question as which tags it carries, and having to
+close the editor to answer it was the odd part. Change it and Save; if the task
+has subtasks, a **Move subtasks too** box appears beside the field and comes
+alive once the list actually differs. Leaving it unticked leaves them behind as
+root tasks in the old list, because a parent link only resolves within one
+calendar. Read-only tasks are the exception: the editor is disabled for them
+whole, and *Move to another list…* still works.
+
 Folds stick. A subtree starts closed and stays however you left it, across
 refreshes and restarts of the view; a folded parent shows how many tasks it is
 hiding, so `kaufen  (262)` tells you what you are about to open. **z R** unfolds
@@ -305,12 +314,18 @@ everything, **z M** folds it all back, both also under **View**.
 
 On the board a column is a *status* and nesting is a *relation*, so the two are
 independent: a parent in "In Progress" can have its subtasks scattered across
-every other column. Where a subtask lands without its parent, the parent comes
-along **greyed out** above it — you can see what the task hangs under without
-that row pretending to be a card in this column. Grey rows are scaffolding:
-they cannot be selected, dragged or ticked, because the task they name is
-somewhere else. The same happens in the list view when a subtask is due today
-and its parent next week.
+every other column. The board shows the family either way: where a subtask
+lands without its parent the parent comes along **greyed out** above it, and
+where a parent's subtask has gone to another column it stays under the parent,
+greyed, instead of leaving a card that looks like it has nothing under it. The
+same happens in the list view when a subtask is due today and its parent next
+week.
+
+A grey row is a second rendering of a task that really lives elsewhere, so it
+cannot be dragged, ticked or dropped onto — those would be claims about a
+column the task is only visiting. Its right-click menu works normally though:
+*New subtask*, *Change status*, *Open* and the rest name the task, not the row,
+and act on the real one.
 
 ### Columns, and having fewer of them
 

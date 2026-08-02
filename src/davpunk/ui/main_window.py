@@ -565,11 +565,15 @@ class MainWindow(QMainWindow):
             return
 
         fields = editor.changed_fields()
+        target = editor.moved_to()
         if "parent_uid" in fields:
             # Through reparent_fields, so the task also lands at the end of its
             # new siblings: the order it carries belongs to the group it left.
+            # Anchored to the list it is going to, or "the end" would be the
+            # end of a sibling group in the list it is leaving.
+            anchor = fresh.model_copy(update={"calendar_id": target}) if target else fresh
             chosen = fields.pop("parent_uid")
-            reparent = vm.reparent_fields(fresh, str(chosen) if chosen else None, tasks)
+            reparent = vm.reparent_fields(anchor, str(chosen) if chosen else None, tasks)
             if reparent is None:
                 QMessageBox.warning(
                     self,
@@ -578,9 +582,23 @@ class MainWindow(QMainWindow):
                 )
             else:
                 fields.update(reparent)
-        if not fields:
+        if not fields and target is None:
             return
-        self._guarded(lambda: cache.update_task_optimistic(fresh.id, fields, self.conn))
+        if fields and not self._guarded(
+            lambda: cache.update_task_optimistic(fresh.id, fields, self.conn)
+        ):
+            return  # the move would push an edit the user was just told failed
+        if target is not None:
+            # After the field write, never before: a move queues a 'move'
+            # pending change carrying where to delete from, and an update
+            # landing on top of it rewrites that to a plain create — leaving
+            # the task in both lists on the server.  The other order is safe,
+            # because the move serializes whatever the row holds by then.
+            self._guarded(
+                lambda: cache.move_task_local(
+                    fresh.id, target, self.conn, move_subtree=editor.wants_subtree()
+                )
+            )
         self.refresh()
 
     def set_status(self, status: Status | None) -> None:
