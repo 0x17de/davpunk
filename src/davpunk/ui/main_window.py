@@ -131,6 +131,12 @@ class MainWindow(QMainWindow):
         #: name -> handler, so a menu entry that does nothing is a test failure
         #: rather than something you find by clicking it.
         self.menu_handlers: dict[str, object] = {}
+        #: Key sequences a menu entry already answers.  A menu QAction *is* a
+        #: window shortcut, so binding the same sequence again in
+        #: ``_bind_shortcuts`` makes it ambiguous and Qt then fires neither —
+        #: which is how Ctrl+R, Ctrl+X, Return, Tab and every other key that had
+        #: a menu entry came to do nothing at all.
+        self._menu_sequences: set[str] = set()
 
         file_menu = self.menus["File"] = bar.addMenu("&File")
         self._action(file_menu, "&New task", self.new_task, "new_task")
@@ -227,7 +233,9 @@ class MainWindow(QMainWindow):
             if is_chord(binding):
                 action.setText(f"{text}\t{binding}")
             else:
-                action.setShortcut(QKeySequence(binding))
+                sequence = QKeySequence(binding)
+                action.setShortcut(sequence)
+                self._menu_sequences.add(sequence.toString())
         action.triggered.connect(handler)
         self.menu_handlers[key or text.replace("&", "")] = handler
         menu.addAction(action)
@@ -401,7 +409,14 @@ class MainWindow(QMainWindow):
         self.statusBar().addPermanentWidget(self.attention)
 
     def _bind_shortcuts(self) -> None:
-        """Everything Qt can bind directly; chords are handled in keyPressEvent."""
+        """Everything Qt can bind directly; chords are handled in keyPressEvent.
+
+        Actions that already have a menu entry are skipped: that QAction is
+        itself a window-context shortcut, and a second QShortcut on the same
+        sequence is an *ambiguous* binding, which Qt resolves by activating
+        nothing.  Registering both is why the keys that were easiest to find in
+        the menus were the ones that did not work.
+        """
         handlers = {
             "new_task": self.new_task,
             "new_subtask": self.new_subtask,
@@ -425,8 +440,12 @@ class MainWindow(QMainWindow):
         }
         for action, handler in handlers.items():
             binding = self.keymap.get(action)
-            if binding and not is_chord(binding):
-                QShortcut(QKeySequence(binding), self, activated=handler)
+            if not binding or is_chord(binding):
+                continue
+            sequence = QKeySequence(binding)
+            if sequence.toString() in self._menu_sequences:
+                continue
+            QShortcut(sequence, self, activated=handler)
 
     def keyPressEvent(self, event) -> None:
         """Two-keystroke sequences: ``gg`` to the top, ``dd`` to delete."""

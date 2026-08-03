@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+from collections import Counter
 
 import pytest
 
@@ -3193,6 +3194,23 @@ def test_chords_are_not_registered_as_qt_shortcuts(window):
     assert "d,d" not in bound
 
 
+def bound_sequences(window) -> Counter:
+    """Every key sequence the window answers, and how many times it is bound.
+
+    A menu QAction *is* a window-context shortcut, exactly like a QShortcut, so
+    both have to be counted: the two mechanisms compete for the same sequences.
+    """
+    from PySide6.QtGui import QAction, QShortcut
+
+    counts: Counter = Counter()
+    for shortcut in window.findChildren(QShortcut):
+        counts[shortcut.key().toString().lower()] += 1
+    for action in window.findChildren(QAction):
+        if not action.shortcut().isEmpty():
+            counts[action.shortcut().toString().lower()] += 1
+    return counts
+
+
 def test_every_bound_action_has_a_handler(window):
     """A binding with no handler is a key that silently does nothing.
 
@@ -3200,9 +3218,9 @@ def test_every_bound_action_has_a_handler(window):
     picked few, so a handler added without its binding — or the reverse — is a
     test failure rather than something you find by pressing the key.
     """
-    from PySide6.QtGui import QKeySequence, QShortcut
+    from PySide6.QtGui import QKeySequence
 
-    bound = {s.key().toString().lower() for s in window.findChildren(QShortcut)}
+    bound = bound_sequences(window)
     handlers = {
         "new_task",
         "new_subtask",
@@ -3228,6 +3246,38 @@ def test_every_bound_action_has_a_handler(window):
         binding = window.keymap[action]
         if not is_chord(binding):
             assert QKeySequence(binding).toString().lower() in bound, action
+
+
+def test_no_key_sequence_is_bound_twice(window):
+    """Two bindings on one sequence is *worse* than none: Qt calls that an
+    ambiguous shortcut and resolves it by activating neither.
+
+    Every key with a menu entry — Ctrl+R, Ctrl+X, Return, Tab, n, 1/2/3, ? —
+    used to be registered both as a menu QAction and again as a QShortcut, so
+    the keys that were easiest to discover were precisely the dead ones.
+    """
+    twice = {seq: n for seq, n in bound_sequences(window).items() if n > 1}
+    assert twice == {}
+
+
+def test_a_menu_backed_key_actually_activates(window, qapp):
+    """The end of the chain the two tests above only approximate: press the
+    key, and see the one handler run."""
+    from PySide6.QtGui import QAction
+    from PySide6.QtTest import QTest
+
+    window.show()
+    QTest.qWaitForWindowExposed(window)
+
+    fired = []
+    for action in window.findChildren(QAction):
+        if action.shortcut().toString() == "Ctrl+R":
+            action.triggered.disconnect()  # sync_now would hit the network
+            action.triggered.connect(lambda _checked=False: fired.append("sync"))
+
+    QTest.keyClick(window, Qt.Key_R, Qt.KeyboardModifier.ControlModifier)
+    qapp.processEvents()
+    assert fired == ["sync"]
 
 
 def test_cut_and_paste_are_in_the_overlay(window):
