@@ -430,6 +430,79 @@ def test_a_subtask_added_from_a_grey_row_lands_under_the_real_task(window, make_
     assert row["parent_uid"] == "lack"
 
 
+def test_a_grey_row_is_a_drop_target(window, make_task):
+    """Qt asks the row about a drop *onto* it and the row's *parent* about a
+    drop between two of its children, so without the flag neither the stand-in
+    nor the cards nested under it could be dropped on at all."""
+    cache.create_task_local(make_task("p", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    context = kanban.lists["needsaction"].topLevelItem(0)
+    assert context.flags() & Qt.ItemFlag.ItemIsDropEnabled
+
+
+def test_dropping_a_card_on_a_grey_row_nests_it_under_the_task_behind_it(
+    window, make_task, monkeypatch
+):
+    """A parent in In Progress and the card you want under it can never be
+    cards in the same column, so the grey stand-in is the only place the two
+    are ever side by side — and the drop onto it was thrown away."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QAbstractItemView
+
+    cache.create_task_local(make_task("p", summary="parent", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", summary="child", parent_uid="p"), window.conn)
+    cache.create_task_local(make_task("loose", summary="loose"), window.conn)
+    kanban = _kanban(window)
+    column = kanban.lists["needsaction"]
+    context = _find(column, "c").parent()
+    assert context.text(0) == "parent"
+    assert context.data(0, _TASK_ROLE()) is None  # the grey stand-in, not "p"
+
+    dragged = _task(column, "loose")
+    column.setCurrentItem(_find(column, "loose"))
+    on_item = QAbstractItemView.DropIndicatorPosition.OnItem
+    monkeypatch.setattr(type(column), "itemAt", lambda self, point: context)
+    monkeypatch.setattr(type(column), "dropIndicatorPosition", lambda self: on_item)
+    event = _FakeDrop(column, QPointF(0, 0))
+    column.dropEvent(event)
+
+    assert event.accepted
+    moved = _reload(window, dragged)
+    assert moved.parent_uid == "p"
+    # The column it was dropped in, not the one its new parent lives in: the
+    # status is what the *row* said, and the row is in Needs Action.
+    assert moved.status is Status.NEEDS_ACTION
+
+
+def test_dropping_a_row_on_a_grey_row_nests_it_in_the_list_view_too(window, make_task, monkeypatch):
+    """The buckets slice the list the way the columns slice the board, and a
+    borrowed ancestor is as good a target here as there — the row lands back
+    in whichever bucket its own due date says."""
+    from PySide6.QtCore import QPointF
+    from PySide6.QtWidgets import QAbstractItemView
+
+    cache.create_task_local(make_task("p", summary="parent"), window.conn)
+    cache.create_task_local(make_task("c", summary="child", parent_uid="p"), window.conn)
+    cache.create_task_local(make_task("loose", summary="loose"), window.conn)
+    with cache.tx(window.conn):
+        window.conn.execute("UPDATE tasks SET due_value = '20200101' WHERE uid = 'c'")
+    tree = _list(window)
+    context = _find(tree, "c").parent()  # the grey "parent", in Overdue
+    assert context.text(0) == "parent"
+    assert context.data(0, _TASK_ROLE()) is None
+
+    dragged = _task(tree, "loose")
+    tree.setCurrentItem(_find(tree, "loose"))
+    on_item = QAbstractItemView.DropIndicatorPosition.OnItem
+    monkeypatch.setattr(type(tree), "itemAt", lambda self, point: context)
+    monkeypatch.setattr(type(tree), "dropIndicatorPosition", lambda self: on_item)
+    tree.dropEvent(_FakeDrop(tree, QPointF(0, 0)))
+
+    assert _reload(window, dragged).parent_uid == "p"
+
+
 def test_a_status_chosen_on_a_grey_row_moves_the_real_card(window, make_task):
     cache.create_task_local(make_task("p", status=Status.IN_PROCESS), window.conn)
     cache.create_task_local(make_task("c", parent_uid="p"), window.conn)
@@ -1423,9 +1496,7 @@ def test_the_finished_columns_start_folded_when_completed_is_hidden(window):
     assert not kanban.lists["done"].isHidden()
 
 
-def test_the_finished_columns_start_open_when_completed_is_shown(
-    qapp, conn, calendar_id, db_path
-):
+def test_the_finished_columns_start_open_when_completed_is_shown(qapp, conn, calendar_id, db_path):
     from davpunk.ui.main_window import MainWindow
 
     win = MainWindow(DavPunkConfig(show_completed=True), conn, db_path)

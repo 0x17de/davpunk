@@ -39,9 +39,9 @@ TASK_ROLE = Qt.ItemDataRole.UserRole
 #: bucket headings fold too and have no task behind them.
 FOLD_ROLE = Qt.ItemDataRole.UserRole + 1
 #: The task a grey context row stands in for.  Deliberately not TASK_ROLE:
-#: that role means "a row of this slice's own", and drags, drops, ticks and
-#: fold defaults all key off it.  Menu actions read this one as well —
-#: see :func:`task_of`.
+#: that role means "a row of this slice's own", and drags, ticks and fold
+#: defaults all key off it.  What merely *names* a task reads this one as
+#: well — menu actions, and the row a drop landed on — see :func:`task_of`.
 CONTEXT_ROLE = Qt.ItemDataRole.UserRole + 2
 
 #: Qt's drop indicator, in the viewmodel's terms.  ``OnViewport`` is absent on
@@ -63,22 +63,35 @@ def context_item(task: Task) -> QTreeWidgetItem:
     """A relative this view is not showing here, drawn as grey scaffolding.
 
     It carries no ``TASK_ROLE``: the gestures that mean "this row, here" —
-    dragging it, ticking it, dropping onto it — would be claims about a slice
-    the task is not in, and every handler in this module refuses a row with no
-    task already, the same way it refuses a bucket heading.
+    dragging it, ticking it — would be claims about a slice the task is not
+    in, and every handler in this module refuses a row with no task already,
+    the same way it refuses a bucket heading.
 
     The menu is the other kind of gesture.  "New subtask", "Change status",
     "Open" name the *task*, not the row, and there is exactly one task they
     can mean; refusing them here would only mean walking to another column to
     do the obvious thing.  So the row is selectable and carries its task under
     ``CONTEXT_ROLE``, and every action reads it through :func:`task_of`.
+
+    A drop is that same kind of gesture.  "Under this one" names the task it
+    landed on, and the grey row is often the only place the two are on screen
+    together — a parent in In Progress and the card you want under it are in
+    different columns by definition, and that grey stand-in is what the whole
+    idea of context rows put in reach.  Whatever the drop says about *this*
+    slice — the column's status — it says by where it landed, which is a
+    question about the row and not about the task standing in it.
     """
     item = QTreeWidgetItem([task.summary or "(no summary)"])
     # Its own fold key: closing the real row in the column it lives in has
     # nothing to do with closing the grey stand-in over here.
     item.setData(0, FOLD_ROLE, ("context", task.calendar_id, task.uid))
     item.setData(0, CONTEXT_ROLE, task)
-    item.setFlags(Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable)
+    # Drop-enabled, and not only for drops onto the row itself: Qt asks the
+    # *parent* row whether a drop between two of its children is allowed, so
+    # without this the cards under a grey ancestor could not be reordered.
+    item.setFlags(
+        Qt.ItemFlag.ItemIsEnabled | Qt.ItemFlag.ItemIsSelectable | Qt.ItemFlag.ItemIsDropEnabled
+    )
     item.setToolTip(
         0,
         "Shown for context — this task itself is not among these rows.\n"
@@ -120,9 +133,11 @@ def task_item(node: vm.TreeNode) -> QTreeWidgetItem:
 def task_of(item) -> Task | None:
     """The task a row *acts on*: its own, or the one it stands in for.
 
-    This is what every menu-driven action asks, and the only place the two
-    roles are treated alike.  Everything that means "this row, in this slice"
-    keeps reading ``TASK_ROLE`` directly and keeps refusing a grey row.
+    This is what every menu-driven action asks, and what a drop asks about the
+    row it landed on — the two gestures that name a task rather than claim a
+    row.  Everything that means "this row, in this slice" — dragging it,
+    ticking it, counting it — keeps reading ``TASK_ROLE`` directly and keeps
+    refusing a grey row.
     """
     if item is None:
         return None
@@ -469,6 +484,11 @@ class ListView(QWidget):
         The buckets are a computed view of DUE, not a settable field, so a
         heading is not a drop target — it reaches here as ``onto is None``,
         which is also what empty space looks like.
+
+        A grey context row does reach here, as the task it stands in for: a
+        drop names a task, and there is only one it can mean.  Nesting under
+        an ancestor the bucket only borrowed is a perfectly good thing to ask
+        for, and the row lands back in whichever bucket its own DUE says.
         """
         if onto is None:
             return
@@ -524,8 +544,10 @@ class _DropTree(QTreeWidget):
         position = DROP_POSITIONS.get(self.dropIndicatorPosition(), vm.DropPosition.ON)
         target = self.itemAt(event.position().toPoint())
         # A bucket heading carries no task, so it lands here as None and is
-        # refused by every handler — a bucket is a computed view of DUE.
-        onto = target.data(0, TASK_ROLE) if target is not None else None
+        # refused by every handler — a bucket is a computed view of DUE.  A
+        # grey stand-in does carry one, under CONTEXT_ROLE: what a drop names
+        # is the task under the cursor, whether or not this slice owns the row.
+        onto = task_of(target)
 
         event.acceptProposedAction()
         self.dropped.emit(tasks, onto, position)
@@ -910,6 +932,13 @@ class KanbanView(QWidget):
         nesting; without a drop that places a card *beside* another there is no
         drag on the whole board that unnests anything, and a card dragged out
         of its parent silently snapped back under it.
+
+        Onto a grey stand-in: the same two, against the task it stands in for.
+        That is the drop the board was missing — a parent in In Progress and
+        the card you want under it can never be cards in the same column, so
+        the stand-in is the only place they are ever side by side.  The status
+        still comes from the column the row was drawn in, not from the one its
+        task lives in, so the card lands where it was dropped.
 
         One update per task carrying both fields, so an interrupted drag
         cannot leave one nested somewhere it is not shown.
