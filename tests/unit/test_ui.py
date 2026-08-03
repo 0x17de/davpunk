@@ -704,37 +704,79 @@ def test_a_between_cards_drop_beside_a_subtask_joins_it(window, make_task):
     assert _reload(window, _task(column, "loose")).parent_uid == "p"
 
 
-def test_a_between_cards_drop_across_calendars_still_moves_the_column(
-    window, make_task, other_calendar_id
+def test_a_between_cards_drop_across_lists_asks_and_moves(
+    window, make_task, other_calendar_id, monkeypatch
 ):
-    """The nesting is refused — RELATED-TO resolves within one calendar — but
-    the column move came with it and is not refused with it."""
+    """A column holds every list at once, so landing beside a card in another
+    one is an ordinary drop — it just has a move in front of it."""
     cache.create_task_local(make_task("here", calendar_id=other_calendar_id), window.conn)
     cache.create_task_local(make_task("there"), window.conn)
     kanban = _kanban(window)
     column = kanban.lists["needsaction"]
     dragged = _task(column, "there")
 
+    _accept_move(monkeypatch)
     kanban._on_drop("inprogress", [dragged], _task(column, "here"), _BELOW)
 
     moved = _reload(window, dragged)
+    assert moved.calendar_id == other_calendar_id
     assert moved.status is Status.IN_PROCESS
     assert moved.parent_uid is None
 
 
-def test_a_card_cannot_be_nested_under_one_in_another_calendar(
-    window, make_task, other_calendar_id
+def test_declining_the_move_still_leaves_the_column_drop(
+    window, make_task, calendar_id, other_calendar_id, monkeypatch
 ):
-    """RELATED-TO resolves within one calendar, so the link would never render."""
+    """The column move is a second thing the drag asked for, and saying no to
+    the list is not saying no to it."""
+    cache.create_task_local(make_task("here", calendar_id=other_calendar_id), window.conn)
+    cache.create_task_local(make_task("there"), window.conn)
+    kanban = _kanban(window)
+    column = kanban.lists["needsaction"]
+    dragged = _task(column, "there")
+
+    monkeypatch.setattr(MoveDialog, "exec", lambda self: MoveDialog.DialogCode.Rejected)
+    kanban._on_drop("inprogress", [dragged], _task(column, "here"), _BELOW)
+
+    stayed = _reload(window, dragged)
+    assert stayed.calendar_id == calendar_id
+    assert stayed.status is Status.IN_PROCESS
+
+
+def test_a_card_nested_under_one_in_another_list_moves_there_first(
+    window, make_task, other_calendar_id, monkeypatch
+):
+    """RELATED-TO resolves within one calendar, so the card has to become one
+    of that calendar's before it can be nested at all."""
     cache.create_task_local(make_task("p", calendar_id=other_calendar_id), window.conn)
     cache.create_task_local(make_task("c"), window.conn)
     kanban = _kanban(window)
     parent = _find(kanban.lists["needsaction"], "p").data(0, _TASK_ROLE())
     child = _find(kanban.lists["needsaction"], "c").data(0, _TASK_ROLE())
 
+    _accept_move(monkeypatch)
     kanban._on_drop("needsaction", [child], parent)
 
-    assert _reload(window, child).parent_uid is None
+    nested = _reload(window, child)
+    assert nested.calendar_id == other_calendar_id
+    assert nested.parent_uid == "p"
+
+
+def test_declining_the_move_leaves_the_card_unnested(
+    window, make_task, calendar_id, other_calendar_id, monkeypatch
+):
+    cache.create_task_local(make_task("p", calendar_id=other_calendar_id), window.conn)
+    cache.create_task_local(make_task("c"), window.conn)
+    kanban = _kanban(window)
+    parent = _find(kanban.lists["needsaction"], "p").data(0, _TASK_ROLE())
+    child = _find(kanban.lists["needsaction"], "c").data(0, _TASK_ROLE())
+
+    monkeypatch.setattr(MoveDialog, "exec", lambda self: MoveDialog.DialogCode.Rejected)
+    kanban._on_drop("needsaction", [child], parent)
+
+    stayed = _reload(window, child)
+    assert stayed.calendar_id == calendar_id
+    assert stayed.parent_uid is None
 
 
 def _TASK_ROLE():
@@ -1109,15 +1151,92 @@ def test_dropping_a_read_only_row_is_refused(window, make_task):
     assert _reload(window, _task(tree, "b")).parent_uid is None
 
 
-def test_a_row_cannot_be_dropped_onto_one_in_another_calendar(window, make_task, other_calendar_id):
-    """RELATED-TO resolves within one calendar, so the link would never render."""
+def test_a_row_dropped_onto_one_in_another_list_asks_and_moves(
+    window, make_task, other_calendar_id, monkeypatch
+):
+    """The buckets are cut across every list, so the row you are aiming at is
+    as likely to be in another one as not.  Refusing the drop was the app doing
+    nothing at all; it asks instead, and the nesting follows the move."""
     cache.create_task_local(make_task("there", calendar_id=other_calendar_id), window.conn)
     cache.create_task_local(make_task("here"), window.conn)
     tree = _list(window)
 
+    _accept_move(monkeypatch)
     window.list_view._on_drop([_task(tree, "here")], _task(tree, "there"), _ON)
 
-    assert _reload(window, _task(tree, "here")).parent_uid is None
+    moved = _reload(window, _task(tree, "here"))
+    assert moved.calendar_id == other_calendar_id
+    assert moved.parent_uid == "there"
+
+
+def test_the_drop_names_the_list_it_landed_in(window, make_task, other_calendar_id, monkeypatch):
+    """The gesture already said where: the dialog shows the destination rather
+    than reopening the question."""
+    cache.create_task_local(make_task("there", calendar_id=other_calendar_id), window.conn)
+    cache.create_task_local(make_task("here"), window.conn)
+    tree = _list(window)
+
+    asked = []
+
+    def _exec(dialog):
+        asked.append((dialog.target_calendar_id(), dialog.target.isEnabled()))
+        return MoveDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(MoveDialog, "exec", _exec)
+    window.list_view._on_drop([_task(tree, "here")], _task(tree, "there"), _ON)
+
+    assert asked == [(other_calendar_id, False)]
+
+
+def test_declining_the_move_leaves_the_row_where_it_was(
+    window, make_task, calendar_id, other_calendar_id, monkeypatch
+):
+    cache.create_task_local(make_task("there", calendar_id=other_calendar_id), window.conn)
+    cache.create_task_local(make_task("here"), window.conn)
+    tree = _list(window)
+
+    monkeypatch.setattr(MoveDialog, "exec", lambda self: MoveDialog.DialogCode.Rejected)
+    window.list_view._on_drop([_task(tree, "here")], _task(tree, "there"), _ON)
+
+    stayed = _reload(window, _task(tree, "here"))
+    assert stayed.calendar_id == calendar_id
+    assert stayed.parent_uid is None
+
+
+def test_a_row_dropped_between_two_in_another_list_lands_between_them(
+    window, make_task, other_calendar_id, monkeypatch
+):
+    cache.create_task_local(
+        make_task("a", calendar_id=other_calendar_id, davpunk_order=1000), window.conn
+    )
+    cache.create_task_local(
+        make_task("b", calendar_id=other_calendar_id, davpunk_order=2000), window.conn
+    )
+    cache.create_task_local(make_task("mine", davpunk_order=9000), window.conn)
+    tree = _list(window)
+
+    _accept_move(monkeypatch)
+    window.list_view._on_drop([_task(tree, "mine")], _task(tree, "a"), _BELOW)
+
+    moved = _reload(window, _task(tree, "mine"))
+    assert moved.calendar_id == other_calendar_id
+    assert 1000 < moved.davpunk_order < 2000
+
+
+def test_a_dropped_subtree_is_carried_across_whole(
+    window, make_task, other_calendar_id, monkeypatch
+):
+    """The subtree question comes with the dialog, so a drop asks it the same
+    way the m dialog does — and a parent dragged across takes its family."""
+    cache.create_task_local(make_task("target", calendar_id=other_calendar_id), window.conn)
+    cache.create_task_local(make_task("p"), window.conn)
+    kid = cache.create_task_local(make_task("kid", parent_uid="p"), window.conn)
+    tree = _list(window)
+
+    _accept_move(monkeypatch, subtree=True)
+    window.list_view._on_drop([_task(tree, "p")], _task(tree, "target"), _ON)
+
+    assert cache.get_task_row(kid, window.conn)["calendar_id"] == other_calendar_id
 
 
 def test_a_rebalancing_drop_reports_it_once(window, make_task):

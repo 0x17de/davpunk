@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import time
+from collections.abc import Callable
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QBrush, QPalette
@@ -33,6 +34,11 @@ from davpunk.ui import viewmodel as vm
 from davpunk.ui.filter_bar import FilterBar
 
 log = logging.getLogger("davpunk.ui.views")
+
+#: The window's cross-list move prompt, as the views see it: the tasks that
+#: came from another list and the list they were dropped in, in; the tasks it
+#: actually moved, out.  See :func:`carry_into`.
+MoveHook = Callable[[list[Task], str], list[Task]]
 
 TASK_ROLE = Qt.ItemDataRole.UserRole
 #: The identity a fold is remembered under.  Separate from TASK_ROLE because
@@ -191,8 +197,45 @@ def _write_orders(orders: dict[str, int], candidates: list[Task], conn) -> None:
             cache.update_task_optimistic(target.id, {"davpunk_order": order}, conn)
 
 
+def carry_into(
+    conn, dragged: list[Task], calendar_id: str, move_into: MoveHook | None
+) -> list[Task]:
+    """``dragged``, with whatever came from another list carried into ``calendar_id``.
+
+    A drop names a place, and in both views that place is as likely to be in
+    another list as not: the board interleaves the lists by status and the list
+    view by due date, so the row you are aiming at is rarely one you picked the
+    calendar of.  Refusing such a drag outright was the old behaviour, and it
+    made the obvious gesture do nothing at all.
+
+    Crossing lists is a real move, though — a two-stage PUT/DELETE with the
+    subtree question attached — so it is not something a drag may do silently.
+    ``move_into`` is the window's prompt: it takes the tasks from elsewhere and
+    the list they landed in, asks, moves, and returns what it actually moved.
+    A view nobody wired one up to crosses nothing, which is the old refusal.
+
+    Every task from elsewhere is re-read once a move happened, not only the
+    ones the prompt named: a subtree move carries children that were never in
+    the drag.  A task left behind comes back in its own list and is refused
+    downstream exactly the way it always was.
+    """
+    strangers = [task for task in dragged if task.calendar_id != calendar_id]
+    if not strangers or move_into is None:
+        return dragged
+    if not move_into(strangers, calendar_id):
+        return dragged
+
+    fresh = {task.id: task for task in vm.load_tasks(conn)}
+    return [fresh.get(task.id, task) for task in dragged]
+
+
 def apply_sibling_drop(
-    conn, dragged: list[Task], onto: Task, position, extra: dict[str, object] | None = None
+    conn,
+    dragged: list[Task],
+    onto: Task,
+    position,
+    extra: dict[str, object] | None = None,
+    move_into: MoveHook | None = None,
 ) -> tuple[int, bool]:
     """Place ``dragged`` beside ``onto``, at ``onto``'s level.
 
@@ -202,10 +245,15 @@ def apply_sibling_drop(
     it on a column can only ever be a status change, so without this there is
     no drag that unnests a card at all.
 
+    A task from another list is carried into ``onto``'s first — see
+    :func:`carry_into` — so landing beside a row in another calendar is a move
+    and then an ordinary reorder.  Declining the move leaves it where it was,
+    and the reparent is refused the way it always was.
+
     ``extra`` is written with the parent and the order in a single update, so
     an interrupted drop cannot leave a card nested where its column says it is
-    not.  It is written even for a task the reparent refuses — another
-    calendar, or a drop inside the task's own subtree — because the column move
+    not.  It is written even for a task the reparent refuses — a move
+    declined, or a drop inside the task's own subtree — because the column move
     that came with it is still a thing the user asked for, and silently doing
     nothing is the bug this whole function exists to fix.
 
@@ -215,14 +263,19 @@ def apply_sibling_drop(
 
     Returns ``(tasks touched, whether a gap had to be rebalanced)``.
     """
+    carried = carry_into(
+        conn, [t for t in dragged if not t.is_read_only], onto.calendar_id, move_into
+    )
+    # After the move, or `topmost` reads the calendar a parent has just left
+    # and stops recognising its own children.
     tasks = vm.load_tasks(conn)
-    movable = vm.topmost([t for t in dragged if not t.is_read_only], tasks)
+    movable = vm.topmost(carried, tasks)
 
     anchor, where, touched, rebalanced = onto, position, 0, False
     for task in movable:
         key = (task.calendar_id, task.uid)
-        # The refusals that mean "not here, ever": another calendar, or a drop
-        # that would put the anchor inside the task's own subtree.
+        # The refusals that mean "not here, ever": a list the task did not
+        # move into, or a drop that would put the anchor inside its own subtree.
         refused = task.calendar_id != anchor.calendar_id or (
             anchor.uid != task.uid and anchor.uid in vm.descendants(task, tasks)
         )
@@ -332,6 +385,10 @@ class ListView(QWidget):
         self.show_completed = config.show_completed  # runtime toggle, not persisted
         self._last_reorder = 0.0
         self._pending_reorder = 0
+        #: What a drop into another list goes through — see :func:`carry_into`.
+        #: The window sets it, because the move asks a question and can fail in
+        #: ways only the window knows how to report.
+        self.move_into: MoveHook | None = None
 
         # Which subtrees are open has to outlive a refresh, or the two-second
         # poll re-opens everything and folding is decorative.
@@ -489,11 +546,18 @@ class ListView(QWidget):
         drop names a task, and there is only one it can mean.  Nesting under
         an ancestor the bucket only borrowed is a perfectly good thing to ask
         for, and the row lands back in whichever bucket its own DUE says.
+
+        A row in another list reaches here like any other: the buckets are cut
+        across every calendar, so "tomorrow" holds all of them side by side and
+        a drop between two of them means what it looks like.  It asks first —
+        crossing lists is a move.
         """
         if onto is None:
             return
 
-        touched, rebalanced = apply_sibling_drop(self.conn, dragged, onto, position)
+        touched, rebalanced = apply_sibling_drop(
+            self.conn, dragged, onto, position, move_into=self.move_into
+        )
         self.refresh()
         message = self._coalesce(touched, rebalanced)
         if message:
@@ -676,6 +740,8 @@ class KanbanView(QWidget):
         self.config = config
         self.columns = config.kanban.columns
         self.filter = vm.TaskFilter()
+        #: What a drop into another list goes through — see :func:`carry_into`.
+        self.move_into: MoveHook | None = None
         # The same runtime view state the list view has, for the same reason:
         # a board with the Done column configured shows finished work until
         # you say otherwise.
@@ -940,6 +1006,11 @@ class KanbanView(QWidget):
         still comes from the column the row was drawn in, not from the one its
         task lives in, so the card lands where it was dropped.
 
+        Onto a card in another list: the move first, asked for through
+        :func:`carry_into`, and then the same nesting.  A column is a status
+        and holds every list at once, so "under this one" lands across lists
+        constantly, and refusing it was the board doing nothing at all.
+
         One update per task carrying both fields, so an interrupted drag
         cannot leave one nested somewhere it is not shown.
         """
@@ -951,16 +1022,28 @@ class KanbanView(QWidget):
             return
 
         if onto is not None and position is not vm.DropPosition.ON:
-            apply_sibling_drop(self.conn, movable, onto, position, vm.drop_fields(column))
+            apply_sibling_drop(
+                self.conn,
+                movable,
+                onto,
+                position,
+                vm.drop_fields(column),
+                move_into=self.move_into,
+            )
             self.refresh()
             return
 
         nesting: dict[str, dict[str, object]] = {}
         if onto is not None:
+            # A column spans every list, so the card you are nesting under is
+            # often in another one.  It is carried across first — asking as it
+            # goes — and the nesting is then an ordinary same-list one.
+            movable = carry_into(self.conn, movable, onto.calendar_id, self.move_into)
             for plan in vm.plan_paste(movable, onto, vm.load_tasks(self.conn)):
                 if plan.needs_move:
-                    # RELATED-TO resolves within one calendar only, so this
-                    # would be a link that never renders.
+                    # The move was declined or refused, and RELATED-TO resolves
+                    # within one calendar only: this would be a link that never
+                    # renders.
                     log.info(
                         "Refusing to nest %s under a task in another calendar",
                         plan.task.uid[:8],

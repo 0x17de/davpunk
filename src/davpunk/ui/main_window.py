@@ -80,6 +80,10 @@ class MainWindow(QMainWindow):
         self.search_view = SearchView(conn)
         for view in (self.list_view, self.kanban_view, self.search_view):
             view.taskActivated.connect(self.open_editor)
+        # A drop that lands in another list is a move, and a move asks a
+        # question and can fail — both of which are the window's to handle.
+        self.list_view.move_into = self.move_dropped
+        self.kanban_view.move_into = self.move_dropped
         self.list_view.toast.connect(lambda text: self.statusBar().showMessage(text, 3000))
 
         self.stack = QStackedWidget()
@@ -821,6 +825,43 @@ class MainWindow(QMainWindow):
         subtree = dialog.wants_subtree()
         self._guarded(lambda: self._move_all(tasks, target, subtree=subtree))
         self.refresh()
+
+    def move_dropped(self, tasks: list[Task], target: str) -> list[Task]:
+        """A drop landed in another list: ask, then carry the tasks over.
+
+        Both views hand their cross-list drops here.  The gesture already named
+        the destination — it is the row the card was let go on — so the dialog
+        opens in its fixed-target form, the same one a cross-list paste uses,
+        and is there for the subtree question and for the chance to say no.  A
+        drag is a cheap thing to do by accident, and a move is a PUT and a
+        DELETE against two collections; doing that silently under the mouse is
+        not a trade this app makes anywhere else.
+
+        Returns the tasks that actually moved, so the view can tell a drop that
+        crossed from one that was declined or refused.
+        """
+        dialog = MoveDialog(
+            cache.calendar_rows(self.conn),
+            tasks[0].calendar_id,
+            any(cache.children_of(task.id, self.conn) for task in tasks),
+            self,
+            fixed_target=target,
+            heading=f"Dropping here also moves {_name_list(tasks)} to another list:",
+        )
+        if dialog.exec() != MoveDialog.DialogCode.Accepted:
+            return []
+
+        subtree = dialog.wants_subtree()
+        chosen = vm.topmost(tasks, vm.load_tasks(self.conn)) if subtree else tasks
+        return [
+            task
+            for task in chosen
+            if self._guarded(
+                lambda task=task: cache.move_task_local(
+                    task.id, target, self.conn, move_subtree=subtree
+                )
+            )
+        ]
 
     def _move_all(self, tasks: list[Task], target: str, *, subtree: bool) -> None:
         """One move per task, skipping any an ancestor already carries.

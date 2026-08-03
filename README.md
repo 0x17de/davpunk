@@ -295,6 +295,13 @@ date rather than set, so a heading is not a drop target. Every task editor also
 carries a **Parent** picker, which offers only tasks in the same list and never
 the task's own subtree.
 
+Both views mix your lists together — the board sorts by status, the list by due
+date — so the row you are aiming at is often in another list. Drag onto it
+anyway: DavPunk asks first, because moving a task to another list is a real
+move on the server, and shows you where it is about to land along with the same
+**Move subtasks too** question the **m** dialog has. Say no and the task stays
+where it was; on the board it still lands in the column you dropped it in.
+
 A drag carries the whole selection, so you can pick up a range and move it in
 one go; it keeps the order you picked it up in. Grabbing a row that is *not*
 selected drags only that row. Selecting a parent and one of its children and

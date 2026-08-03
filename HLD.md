@@ -1243,14 +1243,40 @@ same helper scopes a multi-task move, for the same reason.
 Several dragged tasks land in the order they were picked up in, each just below
 the one before it. A task already exactly where it is being dropped writes
 nothing but **still becomes the anchor** for the next one; only the refusals
-that mean "not here, ever" (another calendar, or an anchor inside the task's own
-subtree) skip it entirely. Advancing the anchor on a no-op is what keeps a
-block in order — without it the second task lands above the first.
+that mean "not here, ever" (a list the task did not move into, or an anchor
+inside the task's own subtree) skip it entirely. Advancing the anchor on a
+no-op is what keeps a block in order — without it the second task lands above
+the first.
+
+**Drops that cross lists.** Both views interleave the calendars — the board by
+status, the list by due date — so the row a drag is aimed at is rarely one
+whose list the user chose, and refusing such a drop outright made the most
+obvious gesture in the app do nothing at all. `carry_into` runs first instead:
+it takes the dragged tasks that came from elsewhere and moves them into the
+list the drop landed in, after which the reparent, the reorder and the column
+are all ordinary same-list writes and no planner has to know a move happened.
+`plan_list_drop` and `plan_paste` therefore keep refusing cross-calendar work
+untouched — a `RELATED-TO` across lists still never resolves; what
+changed is that by the time they run, there is no longer a list to cross.
+
+Crossing is not silent. A drag is a cheap thing to do by accident and a move is
+a PUT and a DELETE against two collections, so `carry_into` asks through a hook
+the window owns (`MainWindow.move_dropped`): the same `MoveDialog` in its
+fixed-target form that a cross-list paste raises, showing the destination the
+gesture already named and carrying the "move subtasks too" question. It returns
+the tasks it actually moved; every task from elsewhere is then re-read, not
+only those, because a subtree move carries children that were never in the
+drag. A declined or failed one comes back in its own list and is refused
+downstream exactly as before — on the board that still leaves the column move
+it came with, which is a second thing the user asked for. The view holds the
+hook as plain `move_into`, unset by default, because a question and a
+`QMessageBox` for its failures are the window's to own, and a view with no hook
+crosses nothing.
 
 **Kanban drops.** Onto a card, `plan_paste` decides the nesting for the whole
 dragged set at once, so the descendant-dedup and the cycle refusal are the code
-cut-and-paste uses; a plan that `needs_move` is refused rather than performed,
-because nesting across calendars is a `RELATED-TO` that never resolves.
+cut-and-paste uses; a plan that still `needs_move` after `carry_into` — the
+move declined, or refused by the cache — is refused rather than performed.
 **Between** two cards it is `apply_sibling_drop` — the same function the list
 view uses, because the gesture means the same thing in both: become a sibling
 of the row you landed beside. That is also the only drag on the board that
