@@ -43,6 +43,7 @@ DEFAULT_KEYS: dict[str, str] = {
     # Shift+N rather than a bare "N": QKeySequence folds an unmodified letter,
     # so "N" and "n" would be one ambiguous shortcut and neither would fire.
     "new_subtask": "Shift+N",
+    "new_subtasks": "Ctrl+Shift+N",
     "open_editor": "Return",
     "toggle_complete": "Space",
     "delete_task": "d,d",

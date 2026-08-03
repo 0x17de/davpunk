@@ -139,8 +139,8 @@ def test_create_and_update_payloads_also_hide_the_local_id(ctx, calendar_id):
 # ------------------------------------------------------------- capabilities
 
 
-def test_there_are_exactly_twelve_tools():
-    assert len(tools.TOOLS) == 12
+def test_there_are_exactly_thirteen_tools():
+    assert len(tools.TOOLS) == 13
 
 
 def test_every_capability_is_off_by_default():
@@ -344,6 +344,88 @@ def test_a_parent_in_another_calendar_is_refused(ctx, calendar_id, other_calenda
         ctx,
         calendar_id=other_calendar_id,
         summary="Child",
+        parent_ref=format_ref(calendar_id, "parent"),
+    )
+    assert result["error"] == "parent_in_other_calendar"
+
+
+# -------------------------------------------------------------- bulk creates
+
+
+def test_create_tasks_writes_them_all_under_one_parent(ctx, calendar_id, synced_task):
+    synced_task("parent")
+    result = tools.create_tasks(
+        ctx,
+        calendar_id,
+        ["Draft the notes", "Tag the commit", "Update the flake"],
+        parent_ref=format_ref(calendar_id, "parent"),
+    )
+    assert result["count"] == 3
+    parents = {tools.get_task(ctx, e["task_ref"])["parent"] for e in result["created"]}
+    assert parents == {format_ref(calendar_id, "parent")}
+
+
+def test_create_tasks_keeps_the_order_it_was_given(ctx, conn, calendar_id, synced_task):
+    """One read of the sibling group, not one per task — otherwise every task in
+    the batch is told the same "end of the list"."""
+    synced_task("parent")
+    result = tools.create_tasks(
+        ctx, calendar_id, ["first", "second", "third"], parent_ref=format_ref(calendar_id, "parent")
+    )
+    rows = conn.execute(
+        "SELECT summary FROM tasks WHERE parent_uid = 'parent' ORDER BY davpunk_order"
+    ).fetchall()
+    assert [row["summary"] for row in rows] == ["first", "second", "third"]
+    assert result["count"] == 3
+
+
+def test_a_second_batch_lands_after_the_first(ctx, conn, calendar_id, synced_task):
+    synced_task("parent")
+    ref = format_ref(calendar_id, "parent")
+    tools.create_tasks(ctx, calendar_id, ["a", "b"], parent_ref=ref)
+    tools.create_tasks(ctx, calendar_id, ["c"], parent_ref=ref)
+    rows = conn.execute(
+        "SELECT summary FROM tasks WHERE parent_uid = 'parent' ORDER BY davpunk_order"
+    ).fetchall()
+    assert [row["summary"] for row in rows] == ["a", "b", "c"]
+
+
+def test_a_batch_of_root_tasks_is_ordered_too(ctx, conn, calendar_id):
+    """``parent_uid IS NULL``, never ``= NULL``, which matches nothing."""
+    tools.create_tasks(ctx, calendar_id, ["one", "two"])
+    tools.create_tasks(ctx, calendar_id, ["three"])
+    rows = conn.execute(
+        "SELECT summary FROM tasks WHERE parent_uid IS NULL ORDER BY davpunk_order"
+    ).fetchall()
+    assert [row["summary"] for row in rows] == ["one", "two", "three"]
+
+
+def test_blank_summaries_are_dropped_and_an_empty_batch_refused(ctx, calendar_id):
+    result = tools.create_tasks(ctx, calendar_id, ["  Real  ", "", "   "])
+    assert result["count"] == 1
+    assert tools.get_task(ctx, result["created"][0]["task_ref"])["summary"] == "Real"
+    assert tools.call("create_tasks", ctx, calendar_id=calendar_id, summaries=[])["error"] == (
+        "no_summaries"
+    )
+
+
+def test_an_oversized_batch_is_refused_before_anything_is_written(ctx, conn, calendar_id):
+    summaries = [f"t{i}" for i in range(tools.CREATE_BATCH_LIMIT + 1)]
+    result = tools.call("create_tasks", ctx, calendar_id=calendar_id, summaries=summaries)
+    assert result["error"] == "batch_too_large"
+    assert result["limit"] == tools.CREATE_BATCH_LIMIT
+    assert conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 0
+
+
+def test_a_bulk_parent_in_another_calendar_is_refused(
+    ctx, calendar_id, other_calendar_id, synced_task
+):
+    synced_task("parent")
+    result = tools.call(
+        "create_tasks",
+        ctx,
+        calendar_id=other_calendar_id,
+        summaries=["Child"],
         parent_ref=format_ref(calendar_id, "parent"),
     )
     assert result["error"] == "parent_in_other_calendar"

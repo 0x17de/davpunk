@@ -1,4 +1,4 @@
-"""The 12 MCP tools, as plain functions.
+"""The 13 MCP tools, as plain functions.
 
 MCP is an **editor-role** writer: every write goes through the same
 ``cache.py`` helpers as the Qt UI, never raw SQL.
@@ -29,11 +29,17 @@ from davpunk.core.cache import (
 )
 from davpunk.core.locking import is_syncing
 from davpunk.mcp.refs import RefError, format_ref, ref_of, resolve
-from davpunk.models.task import Status, Task
+from davpunk.models.task import ORDER_STEP, Status, Task
 
 log = logging.getLogger("davpunk.mcp.tools")
 
 SEARCH_DEFAULT_LIMIT = 50
+
+#: How many tasks one ``create_tasks`` call may write.  A batch is neither a
+#: transaction nor cancellable, so the cap is what keeps a mistyped list from
+#: becoming a sync queue nobody asked for — and the error names the number,
+#: so an agent can split rather than guess.
+CREATE_BATCH_LIMIT = 100
 
 
 class Capability:
@@ -290,6 +296,35 @@ def search_tasks(
 # ----------------------------------------------------------------- write tools
 
 
+def _require_calendar(ctx: ToolContext, calendar_id: str) -> None:
+    if ctx.conn.execute("SELECT 1 FROM calendars WHERE id = ?", (calendar_id,)).fetchone() is None:
+        raise ToolError(
+            "calendar_not_found",
+            f"no calendar {calendar_id!r}; call list_calendars for valid ids",
+            calendar_id=calendar_id,
+        )
+
+
+def _parent_uid(ctx: ToolContext, calendar_id: str, parent_ref: str | None) -> str | None:
+    """The uid a ``parent_ref`` names, refusing one in another calendar.
+
+    ``RELATED-TO`` resolves within a single collection, so a cross-calendar
+    parent is not a link that renders badly — it is one that never renders at
+    all, and silently creating a root task where a subtask was asked for is
+    worse than saying no.
+    """
+    if not parent_ref:
+        return None
+    parent = resolve(parent_ref, ctx.conn)
+    if parent["calendar_id"] != calendar_id:
+        raise ToolError(
+            "parent_in_other_calendar",
+            "a parent must live in the same calendar as its subtask",
+            parent_ref=parent_ref,
+        )
+    return parent["uid"]
+
+
 def create_task(
     ctx: ToolContext,
     calendar_id: str,
@@ -304,24 +339,8 @@ def create_task(
     parent_ref: str | None = None,
 ) -> dict[str, Any]:
     ctx.require(Capability.WRITE, "create_task")
-
-    if ctx.conn.execute("SELECT 1 FROM calendars WHERE id = ?", (calendar_id,)).fetchone() is None:
-        raise ToolError(
-            "calendar_not_found",
-            f"no calendar {calendar_id!r}; call list_calendars for valid ids",
-            calendar_id=calendar_id,
-        )
-
-    parent_uid = None
-    if parent_ref:
-        parent = resolve(parent_ref, ctx.conn)
-        if parent["calendar_id"] != calendar_id:
-            raise ToolError(
-                "parent_in_other_calendar",
-                "a parent must live in the same calendar as its subtask",
-                parent_ref=parent_ref,
-            )
-        parent_uid = parent["uid"]
+    _require_calendar(ctx, calendar_id)
+    parent_uid = _parent_uid(ctx, calendar_id, parent_ref)
 
     task = Task(
         uid=uuid.uuid4().hex,
@@ -341,6 +360,87 @@ def create_task(
 
     row = cache.get_task_row(task_id, ctx.conn)
     return {"task_ref": task_ref, "task": _projection(row)}
+
+
+def create_tasks(
+    ctx: ToolContext,
+    calendar_id: str,
+    summaries: list[str],
+    *,
+    status: str | None = None,
+    categories: list[str] | None = None,
+    parent_ref: str | None = None,
+) -> dict[str, Any]:
+    """Create several tasks at once, optionally all under one parent."""
+    ctx.require(Capability.WRITE, "create_tasks")
+    _require_calendar(ctx, calendar_id)
+
+    titles = [s.strip() for s in summaries if isinstance(s, str) and s.strip()]
+    if not titles:
+        raise ToolError("no_summaries", "create_tasks needs at least one non-empty summary")
+    if len(titles) > CREATE_BATCH_LIMIT:
+        raise ToolError(
+            "batch_too_large",
+            f"create_tasks writes at most {CREATE_BATCH_LIMIT} tasks per call; "
+            f"{len(titles)} were given",
+            limit=CREATE_BATCH_LIMIT,
+            given=len(titles),
+        )
+
+    parent_uid = _parent_uid(ctx, calendar_id, parent_ref)
+    # Ordered against the siblings that are already there, in one read: every
+    # task in the batch is written before any of them could be read back, so
+    # asking per task would hand out the same "end of the list" each time and
+    # leave the order given here to chance.
+    order = _next_order(ctx, calendar_id, parent_uid)
+
+    created: list[dict[str, Any]] = []
+    for title in titles:
+        task = Task(
+            uid=uuid.uuid4().hex,
+            calendar_id=calendar_id,
+            summary=title,
+            status=Status(status.upper()) if status else Status.NEEDS_ACTION,
+            parent_uid=parent_uid,
+            categories=categories or [],
+            davpunk_order=order,
+        )
+        # One create per task, each in its own transaction: cache.tx() does not
+        # nest, so a batch is a sequence of writes rather than one atomic one.
+        # A failure part-way is reported with what already exists named, which
+        # is what makes the call safe to repeat for the rest.
+        try:
+            task_id = cache.create_task_local(task, ctx.conn)
+        except CacheError as exc:
+            raise ToolError(
+                "batch_partially_created",
+                f"{len(created)} of {len(titles)} tasks were created before this failed: {exc}",
+                created=[entry["task_ref"] for entry in created],
+                failed_summary=title,
+            ) from exc
+        order += ORDER_STEP
+        task_ref = format_ref(calendar_id, task.uid)
+        created.append(
+            {"task_ref": task_ref, "task": _projection(cache.get_task_row(task_id, ctx.conn))}
+        )
+
+    ctx.audit("create_tasks", parent_ref, f"{len(created)} task(s) in {calendar_id}")
+    return {"created": created, "count": len(created)}
+
+
+def _next_order(ctx: ToolContext, calendar_id: str, parent_uid: str | None) -> int:
+    """One past the last ``X-DAVPUNK-ORDER`` in a sibling group.
+
+    ``parent_uid IS ?`` rather than ``=``: root tasks have a NULL parent, and
+    ``= NULL`` matches nothing, which would put every batch of root tasks back
+    at the start of the list.
+    """
+    row = ctx.conn.execute(
+        "SELECT MAX(davpunk_order) FROM tasks "
+        "WHERE calendar_id = ? AND parent_uid IS ? AND sync_state != 'pending_delete'",
+        (calendar_id, parent_uid),
+    ).fetchone()
+    return (row[0] + ORDER_STEP) if row and row[0] is not None else ORDER_STEP
 
 
 def _update(ctx: ToolContext, tool: str, task_ref: str, fields: dict[str, Any], href: str | None):
@@ -565,6 +665,7 @@ TOOLS: dict[str, tuple[Callable[..., Any], str]] = {
     "get_task": (get_task, Capability.READ),
     "search_tasks": (search_tasks, Capability.READ),
     "create_task": (create_task, Capability.WRITE),
+    "create_tasks": (create_tasks, Capability.WRITE),
     "update_task": (update_task, Capability.WRITE),
     "set_status": (set_status, Capability.WRITE),
     "set_progress": (set_progress, Capability.WRITE),

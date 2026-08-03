@@ -10,7 +10,9 @@ rebalance).
 from __future__ import annotations
 
 import logging
+import re
 import sqlite3
+import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, tzinfo
 from enum import StrEnum
@@ -905,6 +907,70 @@ def checklist_progress(description: str | None) -> tuple[int, int]:
             total += 1
             done += 1
     return (done, total)
+
+
+# ------------------------------------------------------------ bulk entry
+
+
+#: What a list dragged in from somewhere else carries with it: markdown
+#: bullets, and ordinals from a numbered list.
+_BULLET = re.compile(r"^(?:[-*+•]|\d+[.)])\s+")
+#: A checklist box, once its bullet is gone — or written without one.
+_CHECKBOX = re.compile(r"^\[[ xX]\]\s*")
+
+
+def parse_subtask_lines(text: str) -> list[str]:
+    """One summary per non-empty line, for the bulk-subtask dialog.
+
+    The markers are stripped rather than kept, because a SUMMARY reading
+    ``- [ ] Buy milk`` is a checkbox nothing will ever tick: the box is a
+    convention :func:`toggle_checklist_item` honours *inside a description*,
+    and outside one it is just four characters in front of the title.
+
+    Indentation is stripped too rather than read as nesting.  Every line
+    becomes a direct child of the one task the user picked — a depth inferred
+    from leading spaces is a tree nobody asked for, and one that a paste from
+    a wrapped editor would get wrong.
+    """
+    summaries = []
+    for raw in text.splitlines():
+        line = _BULLET.sub("", raw.strip(), count=1)
+        line = _CHECKBOX.sub("", line, count=1).strip()
+        if line:
+            summaries.append(line)
+    return summaries
+
+
+def bulk_subtasks(
+    parent: Task,
+    summaries: list[str],
+    siblings: list[Task],
+    *,
+    status: Status | None = None,
+) -> list[Task]:
+    """The tasks a bulk add is about to create, in the order they were typed.
+
+    Orders are handed out here in one pass rather than by calling
+    :func:`initial_order` per task: that reads the sibling group back out of
+    the database, and every task in a batch is created before any of them can
+    be read again — so each would be told the same "end of the list" and the
+    typed order would survive only by accident.
+    """
+    order = initial_order(siblings)
+    tasks = []
+    for summary in summaries:
+        tasks.append(
+            Task(
+                uid=uuid.uuid4().hex,
+                calendar_id=parent.calendar_id,
+                parent_uid=parent.uid,
+                summary=summary,
+                status=status,
+                davpunk_order=order,
+            )
+        )
+        order += ORDER_STEP
+    return tasks
 
 
 # ------------------------------------------------------------------ loading

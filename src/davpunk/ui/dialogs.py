@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 
+from PySide6.QtGui import QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
@@ -20,7 +21,7 @@ from PySide6.QtWidgets import (
 from davpunk.conflict.resolver import ConflictView, Mode, Resolution
 from davpunk.models.task import Status, Task
 from davpunk.ui.keymap import Keymap
-from davpunk.ui.viewmodel import checklist_progress, descendants
+from davpunk.ui.viewmodel import checklist_progress, descendants, parse_subtask_lines
 
 log = logging.getLogger("davpunk.ui.dialogs")
 
@@ -301,6 +302,79 @@ def _banner_for(task: Task) -> str:
             "become editable again when the collection returns."
         ),
     }.get(task.read_only_reason.value, "⚠ Read-only.")
+
+
+class BulkSubtaskDialog(QDialog):
+    """Many subtasks under one parent: one line, one subtask.
+
+    Deliberately not :class:`TaskEditor` with a repeat button.  The dialog that
+    edits everything is the wrong shape for entering a list you already have in
+    your head — twelve fields per item, twelve times — and the fields it would
+    ask about are exactly the ones a freshly captured subtask has no answer for
+    yet.  What comes out is a title and a place in the sibling order; the rest
+    is what opening one of them afterwards is for.
+    """
+
+    def __init__(self, parent_task: Task, parent=None) -> None:
+        super().__init__(parent)
+        self.setWindowTitle("Add subtasks")
+        # Big enough to see a list in.  A text box sized to one line of text
+        # invites one line of text, which is the one shape this dialog is not
+        # for.
+        self.resize(460, 340)
+
+        layout = QVBoxLayout(self)
+        under = QLabel(f"Under “{parent_task.summary or parent_task.uid}”:")
+        under.setWordWrap(True)
+        layout.addWidget(under)
+
+        self.lines = QPlainTextEdit()
+        self.lines.setPlaceholderText(
+            "One subtask per line.\n\nDraft the release notes\nTag the commit\nUpdate the flake"
+        )
+        layout.addWidget(self.lines)
+
+        self.count = QLabel("")
+        layout.addWidget(self.count)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self.accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+        self._save = buttons.button(QDialogButtonBox.StandardButton.Save)
+
+        # Return belongs to the text box here — it is how you get to the next
+        # subtask — so the dialog needs its own way to say "done".
+        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self._accept_if_any)
+        QShortcut(QKeySequence("Ctrl+Enter"), self, activated=self._accept_if_any)
+
+        self.lines.textChanged.connect(self._recount)
+        self._recount()
+
+    def summaries(self) -> list[str]:
+        return parse_subtask_lines(self.lines.toPlainText())
+
+    def _recount(self) -> None:
+        """Say what Save will do before it does it.
+
+        Blank lines and bullet markers are dropped on the way in, so the number
+        of lines on screen and the number of subtasks about to exist are not
+        always the same — and the count is the only place that difference is
+        visible while it can still be corrected.
+        """
+        count = len(self.summaries())
+        self.count.setText(
+            "Nothing to add yet."
+            if not count
+            else f"Creates {count} subtask{'' if count == 1 else 's'}."
+        )
+        self._save.setEnabled(count > 0)
+
+    def _accept_if_any(self) -> None:
+        if self._save.isEnabled():
+            self.accept()
 
 
 class MoveDialog(QDialog):

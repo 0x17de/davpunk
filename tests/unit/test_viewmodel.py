@@ -940,6 +940,72 @@ def test_checklist_progress_is_a_hint_only():
     assert vm.checklist_progress("no checklist here") == (0, 0)
 
 
+# ------------------------------------------------------------ bulk entry
+
+
+def test_one_summary_per_non_empty_line():
+    assert vm.parse_subtask_lines("first\n\n  second  \n\n\nthird\n") == [
+        "first",
+        "second",
+        "third",
+    ]
+
+
+def test_bullets_checkboxes_and_numbering_are_stripped():
+    """A SUMMARY reading "- [ ] Buy milk" is a checkbox nothing will ever tick:
+    the box is a convention that only means something inside a description."""
+    text = "- Buy milk\n* Eggs\n+ Bread\n• Jam\n1. Butter\n2) Cheese\n- [ ] Tea\n- [x] Coffee\n[ ] Salt"
+    assert vm.parse_subtask_lines(text) == [
+        "Buy milk",
+        "Eggs",
+        "Bread",
+        "Jam",
+        "Butter",
+        "Cheese",
+        "Tea",
+        "Coffee",
+        "Salt",
+    ]
+
+
+def test_a_dash_inside_a_line_survives():
+    """Only a leading marker is a marker."""
+    assert vm.parse_subtask_lines("re-read the RFC 5545 - section 3.8") == [
+        "re-read the RFC 5545 - section 3.8"
+    ]
+
+
+def test_indentation_does_not_nest():
+    """Every line is a direct child of the one task that was picked; a depth
+    read out of leading spaces is a tree nobody asked for."""
+    assert vm.parse_subtask_lines("parent\n    child\n\t\tdeeper") == [
+        "parent",
+        "child",
+        "deeper",
+    ]
+
+
+def test_a_batch_is_ordered_the_way_it_was_typed(make_task):
+    parent = make_task("p")
+    tasks = vm.bulk_subtasks(parent, ["one", "two", "three"], [])
+    assert [t.summary for t in tasks] == ["one", "two", "three"]
+    assert [t.davpunk_order for t in tasks] == [1000, 2000, 3000]
+    assert {t.parent_uid for t in tasks} == {"p"}
+    assert {t.calendar_id for t in tasks} == {parent.calendar_id}
+
+
+def test_a_batch_starts_after_the_siblings_that_are_already_there(make_task):
+    parent = make_task("p")
+    siblings = [make_task("s1", davpunk_order=5000), make_task("s2", davpunk_order=2000)]
+    tasks = vm.bulk_subtasks(parent, ["next", "after that"], siblings)
+    assert [t.davpunk_order for t in tasks] == [6000, 7000]
+
+
+def test_every_task_in_a_batch_gets_its_own_uid(make_task):
+    tasks = vm.bulk_subtasks(make_task("p"), ["a", "b", "c"], [])
+    assert len({t.uid for t in tasks}) == 3
+
+
 # ------------------------------------------------------------------ loading
 
 

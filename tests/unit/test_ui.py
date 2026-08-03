@@ -37,7 +37,7 @@ from davpunk.conflict.resolver import Mode, Resolution, Side, load_conflict
 from davpunk.core import cache
 from davpunk.models.task import ReadOnlyReason, Status, SyncState
 from davpunk.ui import viewmodel as vm
-from davpunk.ui.dialogs import ConflictDialog, MoveDialog, TaskEditor
+from davpunk.ui.dialogs import BulkSubtaskDialog, ConflictDialog, MoveDialog, TaskEditor
 from davpunk.ui.keymap import Keymap, is_chord
 
 pytestmark = pytest.mark.qt
@@ -1980,6 +1980,155 @@ def test_a_new_task_is_ordered_after_its_own_siblings_only(window, make_task, mo
 
     row = window.conn.execute("SELECT davpunk_order FROM tasks WHERE summary = 'Child'").fetchone()
     assert row["davpunk_order"] < 99000
+
+
+# ------------------------------------------------------------- bulk subtasks
+
+
+def _accept_bulk(monkeypatch, text):
+    """Type into the bulk dialog and press Save, without showing it."""
+
+    def _exec(dialog):
+        dialog.lines.setPlainText(text)
+        return BulkSubtaskDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(BulkSubtaskDialog, "exec", _exec)
+
+
+def test_one_line_becomes_one_subtask(window, make_task, monkeypatch):
+    cache.create_task_local(make_task("p"), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "p"))
+
+    _accept_bulk(monkeypatch, "Draft the notes\nTag the commit\nUpdate the flake")
+    window.new_subtasks()
+
+    rows = window.conn.execute(
+        "SELECT summary FROM tasks WHERE parent_uid = 'p' ORDER BY davpunk_order"
+    ).fetchall()
+    assert [row["summary"] for row in rows] == [
+        "Draft the notes",
+        "Tag the commit",
+        "Update the flake",
+    ]
+
+
+def test_a_bulk_batch_lands_after_the_subtasks_already_there(window, make_task, monkeypatch):
+    cache.create_task_local(make_task("p"), window.conn)
+    cache.create_task_local(make_task("first", parent_uid="p", davpunk_order=1000), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "p"))
+
+    _accept_bulk(monkeypatch, "second\nthird")
+    window.new_subtasks()
+
+    rows = window.conn.execute(
+        "SELECT summary FROM tasks WHERE parent_uid = 'p' ORDER BY davpunk_order"
+    ).fetchall()
+    assert [row["summary"] for row in rows][-2:] == ["second", "third"]
+
+
+def test_a_bulk_batch_is_created_in_the_parents_list(
+    window, make_task, other_calendar_id, monkeypatch
+):
+    """A parent link only resolves within one calendar, so a subtask created
+    anywhere else would render as a root task with a dangling link."""
+    cache.create_task_local(make_task("p", calendar_id=other_calendar_id), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "p"))
+
+    _accept_bulk(monkeypatch, "over here")
+    window.new_subtasks()
+
+    row = window.conn.execute(
+        "SELECT calendar_id FROM tasks WHERE summary = 'over here'"
+    ).fetchone()
+    assert row["calendar_id"] == other_calendar_id
+
+
+def test_bulk_subtasks_added_on_the_board_take_the_column_they_were_asked_for(
+    window, make_task, monkeypatch
+):
+    """The same proposal a single new subtask gets: a batch asked for in one
+    column should not scatter across two."""
+    cache.create_task_local(make_task("p", summary="parent", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", summary="child", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    column = kanban.lists["needsaction"]
+    context = column.topLevelItem(0)  # the grey stand-in for "parent"
+    assert context.text(0) == "parent"
+    column.setCurrentItem(context)
+
+    _accept_bulk(monkeypatch, "one\ntwo")
+    window.new_subtasks()
+
+    rows = window.conn.execute(
+        "SELECT status, parent_uid FROM tasks WHERE summary IN ('one', 'two')"
+    ).fetchall()
+    assert len(rows) == 2
+    assert {(r["status"], r["parent_uid"]) for r in rows} == {(Status.NEEDS_ACTION.value, "p")}
+
+
+def test_bullets_pasted_in_do_not_survive_as_titles(window, make_task, monkeypatch):
+    cache.create_task_local(make_task("p"), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "p"))
+
+    _accept_bulk(monkeypatch, "- [ ] Buy milk\n\n  * Eggs\n1. Bread\n")
+    window.new_subtasks()
+
+    rows = window.conn.execute(
+        "SELECT summary FROM tasks WHERE parent_uid = 'p' ORDER BY davpunk_order"
+    ).fetchall()
+    assert [row["summary"] for row in rows] == ["Buy milk", "Eggs", "Bread"]
+
+
+def test_cancelling_the_bulk_dialog_creates_nothing(window, make_task, monkeypatch):
+    cache.create_task_local(make_task("p"), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "p"))
+
+    monkeypatch.setattr(
+        BulkSubtaskDialog, "exec", lambda self: BulkSubtaskDialog.DialogCode.Rejected
+    )
+    window.new_subtasks()
+
+    assert window.conn.execute("SELECT COUNT(*) FROM tasks").fetchone()[0] == 1
+
+
+def test_bulk_subtasks_need_a_selection(window, monkeypatch):
+    monkeypatch.setattr(BulkSubtaskDialog, "exec", lambda self: pytest.fail("nothing was selected"))
+    window.new_subtasks()
+
+
+def test_the_bulk_dialog_counts_what_save_will_create(qapp, make_task):
+    """Blank lines and markers are dropped on the way in, so the count is the
+    only place that difference is visible while it can still be corrected."""
+    dialog = BulkSubtaskDialog(make_task("p"))
+    save = dialog._save
+
+    assert not save.isEnabled() and "Nothing to add" in dialog.count.text()
+
+    dialog.lines.setPlainText("only one")
+    assert save.isEnabled() and dialog.count.text() == "Creates 1 subtask."
+
+    dialog.lines.setPlainText("one\n\n- two\n   \n[ ] three")
+    assert dialog.count.text() == "Creates 3 subtasks."
+    assert dialog.summaries() == ["one", "two", "three"]
+
+    dialog.lines.setPlainText("\n\n   \n")
+    assert not save.isEnabled()
+
+
+def test_the_bulk_entry_is_reachable_from_the_menus(window, make_task):
+    cache.create_task_local(make_task("p"), window.conn)
+    tree = _list(window)
+    tree.setCurrentItem(_find(tree, "p"))
+
+    assert window.menu_handlers["New subtasks…"] == window.new_subtasks
+    menu = window.context_menu_for(window.selected_task())
+    assert {a.text(): a.isEnabled() for a in menu.actions()}["New subtasks…"]
 
 
 # --------------------------------------------------------- reparent by editor

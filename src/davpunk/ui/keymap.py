@@ -53,6 +53,7 @@ LABELS: dict[str, str] = {
     "help_overlay": "This overlay",
     "new_task": "New task",
     "new_subtask": "New subtask of the selection",
+    "new_subtasks": "Add several subtasks at once",
     "open_editor": "Open editor",
     "toggle_complete": "Toggle complete",
     "delete_task": "Delete task",

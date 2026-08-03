@@ -321,6 +321,19 @@ any task offers the same actions. Started from the board, the editor opens on
 the status of the column you were in — right-click a card in "To Do" and the
 new subtask is a "To Do" too, unless you change it before saving.
 
+### Writing down a list you already have
+
+**Ctrl+Shift+N** opens a plain text box instead: one line, one subtask, all of
+them under the selection. It is for the moment you already know the five things
+that need doing and want them written down before you forget the third — the
+full editor, twelve fields at a time, is for afterwards.
+
+Paste from anywhere. Bullets, `- [ ]` boxes and `1.` numbering are stripped, so
+a list copied out of a mail or a README arrives as titles rather than as titles
+with punctuation in front of them. Blank lines are skipped, and the dialog says
+how many subtasks Save will actually create before you press it. Indentation is
+ignored: every line becomes a direct child of the one task you picked.
+
 ### Moving a task when a filter is in the way
 
 A drag needs both tasks on screen, and a filter is precisely what stops that.
@@ -634,7 +647,8 @@ audit     = true             # record every write/delete call in the database
 
 [davpunk.mcp.capabilities]
 read   = true                # list_calendars, list_tasks, get_task, search_tasks
-write  = false               # create_task, update_task, set_status, set_progress, move_task
+write  = false               # create_task, create_tasks, update_task, set_status,
+                             # set_progress, move_task
 delete = false               # delete_task
 sync   = false               # sync_now, sync_status
 ```

@@ -40,7 +40,7 @@ See §16.
 │  EDITOR ROLE                                                     │
 │  ┌────────────────────────────┐   ┌───────────────────────────┐  │
 │  │  davpunk (PySide6 UI)      │   │  davpunk-mcp (FastMCP)    │  │
-│  │  List │ Kanban │ Search    │   │  12 tools, all off by     │  │
+│  │  List │ Kanban │ Search    │   │  13 tools, all off by     │  │
 │  │  TaskEditor │ MergeWindow  │   │  default; task_ref addr.  │  │
 │  │  FirstRun │ Keymap         │   │  paginated lists          │  │
 │  └────────────────────────────┘   └───────────────────────────┘  │
@@ -1073,6 +1073,7 @@ Global     j / k          down / up
            ?              keybinding overlay
 Task       n              new task
            Shift+N        new subtask of the selection
+           Ctrl+Shift+N   add several subtasks at once
            Enter          open editor
            Space          toggle complete
            dd             delete
@@ -1130,6 +1131,28 @@ a single "reordering N tasks" toast. Sort key is
 `(davpunk_order ASC NULLS LAST, uid ASC)`. Each renumbered sibling is a PUT of
 its own, so two clients reordering one list collide — those collisions are
 auto-merged, latest wins, and never reach the merge window (§12).
+
+**Bulk subtask entry.** `Ctrl+Shift+N` opens a plain multi-line box: one line,
+one subtask, all of them direct children of the selection. It is not the task
+editor with a repeat button, because twelve fields per item is the wrong shape
+for a list you already have in your head, and those fields are exactly the ones
+a freshly captured subtask has no answer for yet.
+
+Markdown bullets, `- [ ]` boxes and `1.` ordinals are stripped on the way in
+(`parse_subtask_lines`): a SUMMARY reading `- [ ] Buy milk` is a checkbox
+nothing will ever tick, since the box is a convention that only means something
+*inside a description*. Leading whitespace is stripped rather than read as
+nesting — a depth inferred from a paste is a tree nobody asked for.
+
+Orders are assigned once for the whole batch (`bulk_subtasks`), not by asking
+`initial_order` per task: every task is written before any of them can be read
+back, so a per-task call would hand out the same "end of the list" each time and
+the typed order would survive only by accident. The batch is a sequence of
+`create_task_local` calls rather than one transaction — `tx()` does not nest —
+so a failure part-way leaves the tasks before it in place, visible and editable
+rather than rolled back out from under someone who watched them being typed. On
+the board the batch takes the same proposed status a single new subtask gets,
+so a list asked for in one column does not scatter across two.
 
 **Kanban columns.** (1) If `X-DAVPUNK-KANBAN-COL` is set **and** matches a
 configured column `id`, that column wins. (2) Otherwise, the first configured
@@ -1454,6 +1477,7 @@ helpers as the UI, never raw SQL.
 | `get_task` | read | Full detail for one `task_ref` |
 | `search_tasks` | read | FTS5 full-text + field search (incl. completed); paginated |
 | `create_task` | write | `create_task_local()`; returns the new `task_ref` |
+| `create_tasks` | write | Up to 100 summaries in one call, optionally under one `parent_ref` |
 | `update_task` | write | `update_task_optimistic()`; errors on conflicted or read-only tasks |
 | `set_status` | write | STATUS shortcut; canonicalization is automatic |
 | `set_progress` | write | PERCENT-COMPLETE shortcut |
@@ -1463,6 +1487,16 @@ helpers as the UI, never raw SQL.
 | `sync_status` | sync | Last sync time, remote errors, blocked-change counts per remote |
 
 All four capabilities — read, write, delete, sync — are **off by default**.
+
+**Bulk creates.** `create_tasks` takes a `summaries` list and writes them in the
+order given, ordered against the sibling group in one read — the same rule the
+UI's bulk dialog follows, and for the same reason (§14.6). Blank summaries are
+dropped; an empty list is `no_summaries`, and more than `CREATE_BATCH_LIMIT`
+(100) is `batch_too_large` refused **before** anything is written, so an agent
+splits rather than guesses. The batch is not a transaction, so a failure
+part-way returns `batch_partially_created` naming the refs that already exist —
+which is what makes the rest safe to retry. One audit row per call, not per
+task.
 
 **Pagination and projection.** `list_tasks` takes `limit` (default 100) and
 `offset`; `search_tasks` takes `limit` (default 50). Hard cap 500.

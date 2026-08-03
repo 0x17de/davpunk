@@ -28,7 +28,13 @@ from davpunk.core.cache import CacheError, ReadOnlyResourceError, TaskConflictEr
 from davpunk.core.locking import is_syncing
 from davpunk.models.task import Status, Task
 from davpunk.ui import viewmodel as vm
-from davpunk.ui.dialogs import ConflictDialog, KeymapOverlay, MoveDialog, TaskEditor
+from davpunk.ui.dialogs import (
+    BulkSubtaskDialog,
+    ConflictDialog,
+    KeymapOverlay,
+    MoveDialog,
+    TaskEditor,
+)
 from davpunk.ui.keymap import Keymap, is_chord
 from davpunk.ui.merge_dialog import MergeDialog
 from davpunk.ui.sync_worker import SyncController
@@ -141,6 +147,7 @@ class MainWindow(QMainWindow):
         file_menu = self.menus["File"] = bar.addMenu("&File")
         self._action(file_menu, "&New task", self.new_task, "new_task")
         self._action(file_menu, "New &subtask", self.new_subtask, "new_subtask")
+        self._action(file_menu, "New s&ubtasks…", self.new_subtasks, "new_subtasks")
         self._action(file_menu, "&Sync now", self.sync_now, "sync_now")
         self._action(file_menu, "&Preview sync (dry run)…", self.preview_sync)
         file_menu.addSeparator()
@@ -260,6 +267,7 @@ class MainWindow(QMainWindow):
         "Open task",
         "New task",
         "New subtask",
+        "New subtasks…",
         None,
         ("Change status", tuple(f"Status: {label}" for label, _ in STATUS_ENTRIES)),
         None,
@@ -420,6 +428,7 @@ class MainWindow(QMainWindow):
         handlers = {
             "new_task": self.new_task,
             "new_subtask": self.new_subtask,
+            "new_subtasks": self.new_subtasks,
             "cut_task": self.cut_task,
             "paste_task": self.paste_task,
             "open_editor": self.open_selected,
@@ -529,6 +538,50 @@ class MainWindow(QMainWindow):
         if selected is None:
             return
         self._create_task(parent_uid=selected.uid, calendar_id=selected.calendar_id)
+
+    def new_subtasks(self) -> None:
+        """A list you already have, under the selection, one line each.
+
+        Read from the cache rather than from the row: the selection may be a
+        grey context row standing in for a task in another column, and the
+        subtasks belong to the task, not to the stand-in.
+        """
+        selected = self.selected_task()
+        if selected is None:
+            return
+        parent = cache.get_task(selected.id, self.conn) or selected
+
+        dialog = BulkSubtaskDialog(parent, self)
+        if dialog.exec() != BulkSubtaskDialog.DialogCode.Accepted:
+            return
+        summaries = dialog.summaries()
+        if not summaries:
+            return
+
+        siblings = [
+            task
+            for task in vm.load_tasks(self.conn, calendar_ids=[parent.calendar_id])
+            if task.parent_uid == parent.uid
+        ]
+        # The same status proposal a single new subtask gets: on the board,
+        # "where you asked for it" is a column, and a batch asked for in one
+        # place should not scatter across two.
+        created = vm.bulk_subtasks(
+            parent, summaries, siblings, status=self._proposed_status(selected)
+        )
+        self._guarded(lambda: self._create_all(created))
+        self.refresh()
+
+    def _create_all(self, tasks: list[Task]) -> None:
+        """One create per task, in order.
+
+        Not one transaction: ``create_task_local`` opens its own, and ``tx()``
+        refuses to nest.  A failure part-way therefore leaves the subtasks
+        before it in place — visible and editable, rather than rolled back out
+        from under someone who watched them being typed.
+        """
+        for task in tasks:
+            cache.create_task_local(task, self.conn)
 
     def _proposed_status(self, selected: Task | None) -> Status | None:
         """Which status a new task opens with, on the board.
