@@ -32,7 +32,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from davpunk.config import DavPunkConfig, RemoteConfig
-from davpunk.conflict.resolver import Mode, Resolution, load_conflict
+from davpunk.conflict.resolver import Mode, Resolution, Side, load_conflict
 from davpunk.core import cache
 from davpunk.models.task import ReadOnlyReason, Status, SyncState
 from davpunk.ui import viewmodel as vm
@@ -784,6 +784,106 @@ def test_editing_a_conflicted_task_opens_the_conflict_instead(window, synced_tas
     assert opened["n"] == 1
 
 
+def _conflict(window, synced_task, local=..., remote=...):
+    """``local=None`` / ``remote=None`` are the delete-side modes, not defaults."""
+    task_id = synced_task("cf")
+    with cache.tx(window.conn):
+        cache.upsert_conflict(
+            task_id,
+            ics("cf", "Mine") if local is ... else local,
+            ics("cf", "Theirs") if remote is ... else remote,
+            "e",
+            window.conn,
+        )
+        cache.set_sync_state(task_id, SyncState.CONFLICT, window.conn)
+    window.refresh()
+    return task_id, cache.open_conflicts(window.conn)[0]["id"]
+
+
+def _answer_with(monkeypatch, module, name, outcome):
+    """Stand in for a modal dialog: build it, then return a fixed outcome."""
+    import davpunk.ui.main_window as mw
+
+    class _Stub:
+        def __init__(self, view, keymap=None, parent=None):
+            self.view = view
+            self.resolution = outcome.get("resolution")
+            self.merged = outcome.get("merged")
+            self.skipped = outcome.get("skipped", False)
+            module["opened"] = name
+
+        def exec(self):
+            from PySide6.QtWidgets import QDialog
+
+            return (
+                QDialog.DialogCode.Accepted
+                if self.resolution is not None
+                else QDialog.DialogCode.Rejected
+            )
+
+    monkeypatch.setattr(mw, name, _Stub)
+
+
+def test_a_both_changed_conflict_opens_the_merge_window(window, synced_task, monkeypatch):
+    _, _ = _conflict(window, synced_task)
+    seen = {}
+    _answer_with(monkeypatch, seen, "MergeDialog", {"skipped": True})
+    _answer_with(monkeypatch, seen, "ConflictDialog", {"skipped": True})
+
+    window.resolve_open_conflicts()
+    assert seen["opened"] == "MergeDialog"
+
+
+def test_a_delete_side_conflict_keeps_the_two_button_dialog(window, synced_task, monkeypatch):
+    _conflict(window, synced_task, local=None)
+    seen = {}
+    _answer_with(monkeypatch, seen, "MergeDialog", {"skipped": True})
+    _answer_with(monkeypatch, seen, "ConflictDialog", {"skipped": True})
+
+    window.resolve_open_conflicts()
+    assert seen["opened"] == "ConflictDialog"
+
+
+def test_skipping_defers_the_conflict_instead_of_re_offering_it(window, synced_task, monkeypatch):
+    _, conflict_id = _conflict(window, synced_task)
+    seen = {}
+    _answer_with(monkeypatch, seen, "MergeDialog", {"skipped": True})
+
+    window.resolve_open_conflicts()
+
+    assert cache.open_conflicts(window.conn, include_deferred=False) == []
+    assert cache.open_conflicts(window.conn)[0]["id"] == conflict_id  # still open
+    seen.clear()
+    window.resolve_open_conflicts()
+    assert "opened" not in seen  # and not offered again
+
+
+def test_accepting_resolves_the_conflict(window, synced_task, monkeypatch):
+    from davpunk.conflict.resolver import Resolution as R
+
+    task_id, _ = _conflict(window, synced_task)
+    _answer_with(monkeypatch, {}, "MergeDialog", {"resolution": R.RESTORE_SERVER})
+
+    window.resolve_open_conflicts()
+
+    assert cache.open_conflicts(window.conn) == []
+    assert cache.get_task_row(task_id, window.conn)["sync_state"] == SyncState.CLEAN.value
+
+
+def test_only_a_sync_the_user_asked_for_raises_the_window(window, synced_task, monkeypatch):
+    """A merge window that opens by itself mid-typing is worse than a badge."""
+    _conflict(window, synced_task)
+    seen = {}
+    _answer_with(monkeypatch, seen, "MergeDialog", {"skipped": True})
+
+    window._on_sync_finished("work", "done")  # the periodic sync
+    assert "opened" not in seen
+
+    window.sync_now()
+    window._on_sync_finished("work", "done")
+    assert seen["opened"] == "MergeDialog"
+
+
 def test_reordering_writes_a_new_order(window, make_task):
     for uid, order in (("a", 1000), ("b", 2000), ("c", 3000)):
         cache.create_task_local(make_task(uid, davpunk_order=order), window.conn)
@@ -1251,11 +1351,12 @@ def test_clicking_a_column_name_folds_the_column_away(window, make_task):
     cache.create_task_local(make_task("d", status=Status.COMPLETED), window.conn)
     kanban = _kanban(window)
     kanban.set_show_completed(True)
+    kanban.set_column_folded("done", False)  # it starts folded; see the test below
     assert not kanban.lists["done"].isHidden()
 
     _click_header(kanban.headers["done"])
 
-    assert kanban.folded_columns == {"done"}
+    assert "done" in kanban.folded_columns
     assert kanban.lists["done"].isHidden()
     # A column you cannot see is one you forget, so the count stays on screen.
     assert "(1)" in kanban.headers["done"].text()
@@ -1303,6 +1404,33 @@ def test_a_column_can_start_folded_from_the_config(qapp, conn, calendar_id, db_p
     try:
         assert win.kanban_view.lists["done"].isHidden()
         assert not win.kanban_view.lists["todo"].isHidden()
+    finally:
+        win.sync.stop()
+        win._poll.stop()
+
+
+def test_the_finished_columns_start_folded_when_completed_is_hidden(window):
+    """With "show completed" off they can hold nothing but the cards it hides,
+    so open they are empty width."""
+    kanban = _kanban(window)
+
+    assert not kanban.show_completed
+    assert kanban.folded_columns == {"done", "cancelled"}
+    assert not kanban.lists["needsaction"].isHidden()
+
+    # A seed, not a rule: the name still unfolds them.
+    _click_header(kanban.headers["done"])
+    assert not kanban.lists["done"].isHidden()
+
+
+def test_the_finished_columns_start_open_when_completed_is_shown(
+    qapp, conn, calendar_id, db_path
+):
+    from davpunk.ui.main_window import MainWindow
+
+    win = MainWindow(DavPunkConfig(show_completed=True), conn, db_path)
+    try:
+        assert win.kanban_view.folded_columns == set()
     finally:
         win.sync.stop()
         win._poll.stop()
@@ -2658,24 +2786,13 @@ def conflict_view(conn, task_id, local, remote, etag='W/"v2"'):
     return load_conflict(conflict_id, conn)
 
 
-def test_mode_a_offers_merge_and_take_all_server(qapp, conn, synced_task):
-    task_id = synced_task("cf")
-    view = conflict_view(conn, task_id, ics("cf", "Mine"), ics("cf", "Theirs"))
-    dialog = ConflictDialog(view)
-
-    assert view.mode is Mode.BOTH_CHANGED
-    assert Resolution.MERGE in view.resolutions
-    assert Resolution.RESTORE_SERVER in view.resolutions
-    assert "summary" in dialog._choices
-
-
 def test_mode_a_prime_offers_delete_anyway(qapp, conn, synced_task):
     task_id = synced_task("cf")
     view = conflict_view(conn, task_id, None, ics("cf", "Theirs"))
 
     assert view.mode is Mode.LOCAL_DELETE
     assert set(view.resolutions) == {Resolution.DELETE_ANYWAY, Resolution.RESTORE_SERVER}
-    ConflictDialog(view)  # builds without a diff table
+    ConflictDialog(view)  # the delete-side modes keep their two-button form
 
 
 def test_mode_b_offers_recreate_and_accept(qapp, conn, synced_task):
@@ -2686,26 +2803,135 @@ def test_mode_b_offers_recreate_and_accept(qapp, conn, synced_task):
     assert set(view.resolutions) == {Resolution.RECREATE, Resolution.ACCEPT_DELETION}
 
 
-def test_take_all_local_and_server_flip_every_row(qapp, conn, synced_task):
+def test_skipping_a_delete_side_conflict_decides_nothing(qapp, conn, synced_task):
     task_id = synced_task("cf")
-    view = conflict_view(
+    dialog = ConflictDialog(conflict_view(conn, task_id, None, ics("cf", "Theirs")))
+    dialog.reject()
+
+    assert dialog.skipped is True
+    assert dialog.resolution is None
+
+
+# --------------------------------------------------------------- merge window
+
+
+def merge_dialog(conn, task_id, local, remote, **kwargs):
+    from davpunk.ui.merge_dialog import MergeDialog
+
+    return MergeDialog(conflict_view(conn, task_id, local, remote, **kwargs))
+
+
+def test_the_merge_window_shows_every_field_three_times(qapp, conn, synced_task):
+    from davpunk.conflict.resolver import DIFF_GROUPS
+
+    task_id = synced_task("cf")
+    dialog = merge_dialog(conn, task_id, ics("cf", "Mine"), ics("cf", "Theirs"))
+
+    assert dialog.table.rowCount() == len(DIFF_GROUPS)
+    assert dialog.table.item(0, 1).text() == "Theirs"  # server, left
+    assert dialog.table.item(0, 5).text() == "Mine"  # local, right
+    assert dialog.table.item(0, 3).text() == "Mine"  # result, centre
+
+
+def test_the_result_starts_from_the_newer_side(qapp, conn, synced_task):
+    task_id = synced_task("cf")
+    dialog = merge_dialog(
         conn,
         task_id,
-        ics("cf", "Mine").replace("END:VTODO", "DESCRIPTION:mine\r\nEND:VTODO"),
-        ics("cf", "Theirs").replace("END:VTODO", "DESCRIPTION:theirs\r\nEND:VTODO"),
+        _with(ics("cf", "Mine"), "LAST-MODIFIED:20260801T100000Z"),
+        _with(ics("cf", "Theirs"), "LAST-MODIFIED:20260801T110000Z"),
     )
-    dialog = ConflictDialog(view)
 
-    dialog.take_all(server=True)
-    assert dialog.selected_remote_fields() == {"summary", "description"}
-    dialog.take_all(server=False)
-    assert dialog.selected_remote_fields() == set()
+    assert dialog.state.default_side is Side.REMOTE
+    assert dialog.table.item(0, 3).text() == "Theirs"
 
 
-def test_the_dialog_defaults_to_the_local_side(qapp, conn, synced_task):
+def test_an_arrow_moves_the_server_value_into_the_result(qapp, conn, synced_task):
     task_id = synced_task("cf")
-    view = conflict_view(conn, task_id, ics("cf", "Mine"), ics("cf", "Theirs"))
-    assert ConflictDialog(view).selected_remote_fields() == set()
+    dialog = merge_dialog(conn, task_id, ics("cf", "Mine"), ics("cf", "Theirs"))
+
+    dialog.take("summary", Side.REMOTE)
+
+    assert dialog.table.item(0, 3).text() == "Theirs"
+    assert "(server)" in dialog.table.item(0, 0).text()
+
+
+def test_the_left_and_right_keys_transfer_the_focused_row(qapp, conn, synced_task):
+    """Every action reachable without a mouse."""
+    from PySide6.QtGui import QKeyEvent
+
+    task_id = synced_task("cf")
+    dialog = merge_dialog(conn, task_id, ics("cf", "Mine"), ics("cf", "Theirs"))
+    dialog.table.setCurrentCell(0, 3)
+
+    def press(key):
+        dialog.eventFilter(
+            dialog.table, QKeyEvent(QKeyEvent.Type.KeyPress, key, Qt.KeyboardModifier.NoModifier)
+        )
+
+    press(Qt.Key.Key_Left)
+    assert dialog.state.values("summary") == {"summary": "Theirs"}
+    press(Qt.Key.Key_Right)
+    assert dialog.state.values("summary") == {"summary": "Mine"}
+
+
+def test_only_the_differing_rows_are_marked(qapp, conn, synced_task):
+    task_id = synced_task("cf")
+    dialog = merge_dialog(conn, task_id, ics("cf", "Mine"), ics("cf", "Theirs"))
+
+    assert dialog.table.item(0, 0).font().bold()  # summary differs
+    assert not dialog.table.item(3, 0).font().bold()  # priority does not
+
+
+def test_typing_in_the_centre_is_what_gets_saved(qapp, conn, synced_task):
+    task_id = synced_task("cf")
+    dialog = merge_dialog(conn, task_id, ics("cf", "Mine"), ics("cf", "Theirs"))
+
+    dialog.editors["summary"].widget.setText("Neither")
+    dialog._edited("summary")
+    dialog.accept()
+
+    assert dialog.resolution is Resolution.MERGE
+    assert dialog.merged.summary == "Neither"
+    assert "(edited)" in dialog.table.item(0, 0).text()
+
+
+def test_an_unparseable_due_blocks_accept_instead_of_being_stored(qapp, conn, synced_task):
+    task_id = synced_task("cf")
+    dialog = merge_dialog(conn, task_id, ics("cf", "Mine"), ics("cf", "Theirs"))
+
+    dialog.editors["due"].value.setText("next tuesday")
+    dialog._edited("due")
+
+    assert not dialog.accept_button.isEnabled()
+    assert "not a date" in dialog.error.text()
+
+    dialog.accept()
+    assert dialog.resolution is None  # still open, nothing written
+
+
+def test_taking_everything_from_the_server_needs_no_put(qapp, conn, synced_task):
+    task_id = synced_task("cf")
+    dialog = merge_dialog(conn, task_id, ics("cf", "Mine"), ics("cf", "Theirs"))
+
+    dialog.take_all(Side.REMOTE)
+    dialog.accept()
+
+    assert dialog.resolution is Resolution.RESTORE_SERVER
+
+
+def test_skipping_the_merge_window_decides_nothing(qapp, conn, synced_task):
+    task_id = synced_task("cf")
+    dialog = merge_dialog(conn, task_id, ics("cf", "Mine"), ics("cf", "Theirs"))
+
+    dialog.reject()
+
+    assert dialog.skipped is True
+    assert (dialog.resolution, dialog.merged) == (None, None)
+
+
+def _with(resource: str, line: str) -> str:
+    return resource.replace("END:VTODO", f"{line}\r\nEND:VTODO")
 
 
 # ------------------------------------------------------------------- keymap

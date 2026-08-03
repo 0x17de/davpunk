@@ -4,31 +4,20 @@ from __future__ import annotations
 
 import logging
 
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QButtonGroup,
     QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFormLayout,
-    QHBoxLayout,
     QLabel,
     QLineEdit,
     QPlainTextEdit,
-    QRadioButton,
     QSpinBox,
-    QTableWidget,
-    QTableWidgetItem,
     QVBoxLayout,
 )
 
-from davpunk.conflict.resolver import (
-    ConflictView,
-    Mode,
-    Resolution,
-    merge_from_selection,
-)
+from davpunk.conflict.resolver import ConflictView, Mode, Resolution
 from davpunk.models.task import Status, Task
 from davpunk.ui.keymap import Keymap
 from davpunk.ui.viewmodel import checklist_progress, descendants
@@ -371,7 +360,16 @@ class MoveDialog(QDialog):
 
 
 class ConflictDialog(QDialog):
-    """Modes A / A′ / B, built from the resolver's view."""
+    """Modes A′ and B: one side of the conflict does not exist.
+
+    There is nothing to merge when a task is gone on one side — the honest
+    question is which of two outcomes the user wants — so these keep a plain
+    two-button form.  Mode A goes to
+    :class:`~davpunk.ui.merge_dialog.MergeDialog` instead.
+
+    ``skipped`` means "decide at a later sync", which the caller turns into a
+    deferral rather than a re-offer.
+    """
 
     def __init__(self, view: ConflictView, keymap: Keymap | None = None, parent=None) -> None:
         super().__init__(parent)
@@ -379,14 +377,14 @@ class ConflictDialog(QDialog):
         self.keymap = keymap or Keymap()
         self.resolution: Resolution | None = None
         self.merged: Task | None = None
-        self._choices: dict[str, QButtonGroup] = {}
+        self.skipped = False
 
         self.setWindowTitle(f"Conflict: {view.summary or view.task_id}")
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(_conflict_headline(view.mode)))
-
-        if view.mode is Mode.BOTH_CHANGED:
-            layout.addWidget(self._build_table())
+        headline = QLabel(_conflict_headline(view.mode))
+        headline.setWordWrap(True)
+        layout.addWidget(headline)
+        layout.addWidget(_side_summary(view))
 
         buttons = QDialogButtonBox()
         for resolution in view.resolutions:
@@ -394,74 +392,29 @@ class ConflictDialog(QDialog):
                 _RESOLUTION_LABELS[resolution], QDialogButtonBox.ButtonRole.ActionRole
             )
             button.clicked.connect(lambda _checked=False, r=resolution: self._choose(r))
-        if view.mode is Mode.BOTH_CHANGED:
-            merge = buttons.addButton("Merge && save", QDialogButtonBox.ButtonRole.AcceptRole)
-            merge.clicked.connect(lambda: self._choose(Resolution.MERGE))
-        cancel = buttons.addButton(QDialogButtonBox.StandardButton.Cancel)
-        cancel.clicked.connect(self.reject)
+        skip = buttons.addButton("S&kip for now", QDialogButtonBox.ButtonRole.RejectRole)
+        skip.setToolTip("Leave the conflict open and come back to it at a later sync")
+        skip.clicked.connect(self.reject)
         layout.addWidget(buttons)
 
-    def _build_table(self) -> QTableWidget:
-        changed = self.view.changed
-        table = QTableWidget(len(changed), 4)
-        table.setHorizontalHeaderLabels(["Field", "Local value", "Server value", "Use"])
-        table.verticalHeader().setVisible(False)
-
-        for row, diff in enumerate(changed):
-            table.setItem(row, 0, QTableWidgetItem(diff.field))
-            table.setItem(row, 1, QTableWidgetItem(_render(diff.local)))
-            table.setItem(row, 2, QTableWidgetItem(_render(diff.remote)))
-
-            cell = QHBoxLayout()
-            local = QRadioButton("L")
-            server = QRadioButton("S")
-            local.setChecked(True)
-            group = QButtonGroup(self)
-            group.addButton(local, 0)
-            group.addButton(server, 1)
-            self._choices[diff.field] = group
-            cell.addWidget(local)
-            cell.addWidget(server)
-            container = QLabel()
-            container.setLayout(cell)
-            table.setCellWidget(row, 3, container)
-
-        table.resizeColumnsToContents()
-        return table
-
-    def take_all(self, server: bool) -> None:
-        for group in self._choices.values():
-            group.button(1 if server else 0).setChecked(True)
-
-    def selected_remote_fields(self) -> set[str]:
-        return {field for field, group in self._choices.items() if group.checkedId() == 1}
-
     def _choose(self, resolution: Resolution) -> None:
+        """No merged task: neither mode offers one.
+
+        ``recreate`` keeps the row the user already has — the local snapshot is
+        what it was built from, so re-writing it would change nothing.
+        """
         self.resolution = resolution
-        if resolution is Resolution.MERGE:
-            self.merged = merge_from_selection(self.view, self.selected_remote_fields())
         self.accept()
 
-    def keyPressEvent(self, event) -> None:
-        """``l``/``s`` per field, ``a``/``A`` for all, Enter to save."""
-        text = event.text()
-        if text == self.keymap["take_all_local"]:
-            self.take_all(server=False)
-            return
-        if text == self.keymap["take_all_server"]:
-            self.take_all(server=True)
-            return
-        if event.key() in (Qt.Key.Key_Return, Qt.Key.Key_Enter) and self.view.mode is (
-            Mode.BOTH_CHANGED
-        ):
-            self._choose(Resolution.MERGE)
-            return
-        super().keyPressEvent(event)
+    def reject(self) -> None:
+        """Skip — including the window's close button, which means the same."""
+        self.skipped = True
+        super().reject()
 
 
 _RESOLUTION_LABELS = {
     Resolution.MERGE: "Merge && save",
-    Resolution.RESTORE_SERVER: "Take all server",
+    Resolution.RESTORE_SERVER: "Keep the server's version",
     Resolution.DELETE_ANYWAY: "Delete anyway",
     Resolution.RECREATE: "Recreate on server",
     Resolution.ACCEPT_DELETION: "Accept deletion",
@@ -479,12 +432,20 @@ def _conflict_headline(mode: Mode) -> str:
     }[mode]
 
 
-def _render(value) -> str:
-    if value is None:
-        return "(unset)"
-    if isinstance(value, list):
-        return ", ".join(str(v) for v in value) or "(none)"
-    return str(value)
+def _side_summary(view: ConflictView) -> QLabel:
+    """What the surviving side actually says, so the choice is not blind."""
+    task = view.remote if view.mode is Mode.LOCAL_DELETE else view.local
+    which = "The server's version" if view.mode is Mode.LOCAL_DELETE else "Your version"
+    lines = [f"{which}:"]
+    if task is not None:
+        lines.append(f"  {task.summary or '(no summary)'}")
+        if task.status:
+            lines.append(f"  status {task.status.value}")
+        if task.due_value:
+            lines.append(f"  due {task.due_value}")
+    label = QLabel("\n".join(lines))
+    label.setStyleSheet("color: palette(mid);")
+    return label
 
 
 class KeymapOverlay(QDialog):

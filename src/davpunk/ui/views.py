@@ -683,7 +683,14 @@ class KanbanView(QWidget):
         self._counts: dict[str, int] = {column.id: 0 for column in self.columns}
         #: Collapsed to a strip of name and count.  Runtime state, seeded from
         #: the config the way ``show_completed`` is.
+        #:
+        #: With "show completed" off, the finished columns start folded whatever
+        #: the config says: they can hold nothing but the cards that setting
+        #: hides, so open they are empty width.  Only the startup seed — the
+        #: header still unfolds them, and the toggle leaves the fold alone.
         self.folded_columns: set[str] = {c.id for c in self.columns if c.folded}
+        if not self.show_completed:
+            self.folded_columns |= {c.id for c in self.finished_columns()}
         for column in self.columns:
             box = QVBoxLayout()
             header = _ColumnHeader("")
@@ -831,6 +838,16 @@ class KanbanView(QWidget):
         renumber, and the toggle is about the *state*, not the word.
         """
         return [c for c in self.columns if c.status == Status.IN_PROCESS.value]
+
+    def finished_columns(self) -> list[KanbanColumn]:
+        """The configured columns "show completed" empties.
+
+        The same pair :func:`vm.is_finished` calls finished, matched by status
+        for the same reason :meth:`inprogress_columns` does: the label is the
+        user's to change.
+        """
+        done = {Status.COMPLETED.value, Status.CANCELLED.value}
+        return [c for c in self.columns if c.status in done]
 
     def _skip_child_context(self) -> set[str]:
         """Columns that pull no subtasks down as context this refresh."""

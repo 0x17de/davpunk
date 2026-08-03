@@ -41,7 +41,7 @@ See §16.
 │  ┌────────────────────────────┐   ┌───────────────────────────┐  │
 │  │  davpunk (PySide6 UI)      │   │  davpunk-mcp (FastMCP)    │  │
 │  │  List │ Kanban │ Search    │   │  12 tools, all off by     │  │
-│  │  TaskEditor │ ConflictDlg  │   │  default; task_ref addr.  │  │
+│  │  TaskEditor │ MergeWindow  │   │  default; task_ref addr.  │  │
 │  │  FirstRun │ Keymap         │   │  paginated lists          │  │
 │  └────────────────────────────┘   └───────────────────────────┘  │
 │                                                                  │
@@ -122,11 +122,11 @@ src/davpunk/
 │   ├── cache.py              schema, migrations, tx(), ALL write helpers
 │   ├── recovery.py           corrupt-DB triage
 │   └── credentials.py
-├── conflict/resolver.py
+├── conflict/resolver.py      field groups, MergeState, the 5 paths
 ├── notifications/{dbus_notify,alarm_scan}.py
 ├── ui/…                      main_window, first_run, keymap, sync_worker,
 │                             list_view, kanban_view, search_view,
-│                             task_editor, conflict_dialog, move_dialog
+│                             task_editor, merge_dialog, fields, dialogs
 ├── daemon/sync_daemon.py
 └── mcp/{server,refs,tools}.py
 ```
@@ -334,6 +334,11 @@ CREATE UNIQUE INDEX conflict_open ON conflict_queue (task_id) WHERE resolved = 0
 At most **one** open conflict per task, enforced by the database so a future
 detection site cannot reintroduce an unbounded-insert bug. This is why SQLite
 ≥ 3.24 (in practice ≥ 3.35) is required: partial-index UPSERT inference.
+
+`deferred_at` (schema v2) records a **Skip**: the conflict stays open and stays
+badged, but drops out of the queue the merge window walks after a sync.
+`upsert_conflict()` clears it whenever `remote_raw_ics` actually changes — a
+newer server version is a new question, so an old skip stops answering it.
 
 ### tombstones
 
@@ -783,16 +788,42 @@ A task due `20260731` is overdue after 23:59:59 local on the 31st — not from
 
 ## 12. Conflict resolution
 
-| `local_raw_ics` | `remote_raw_ics` | Mode | Buttons |
+| `local_raw_ics` | `remote_raw_ics` | Mode | Window |
 |---|---|---|---|
-| set | set | **A** — both sides changed | Take all local · Take all server · Merge & save |
-| NULL | set | **A′** — local delete (or move) vs server change | Delete anyway · Keep server version |
-| set | NULL | **B** — server deleted, local changed | Recreate on server · Accept deletion |
+| set | set | **A** — both sides changed | three-pane merge window: Accept · Skip |
+| NULL | set | **A′** — local delete (or move) vs server change | Delete anyway · Keep server version · Skip |
+| set | NULL | **B** — server deleted, local changed | Recreate on server · Accept deletion · Skip |
 
-*Take all local* maps to `resolution='merge'` with every field taken from the
-local column. *Take all server* maps to `restore_server`. Atomic fields (one
-side or the other, no sub-field merging): `description`, to preserve
-inline-checklist integrity.
+### The merge window (mode A)
+
+Server on the left, **result** in the middle, mine on the right; one row per
+field group; the rows that differ are marked, the rest dimmed. Arrows (or
+`←`/`→`, `l`/`s`) move a side's value into the middle, and the middle is
+editable — a merge can end on a value neither side held. *Accept* writes it,
+*Skip* leaves the conflict open and defers it.
+
+The centre is the **result**, not a common ancestor: no base version is stored,
+so this is a two-way merge shown in three panes.
+
+**Field groups.** Fields that are only meaningful together move together —
+`due = (DUE, TZID)`, `dtstart = (DTSTART, TZID)` — because the server's time
+carried over with the local zone is a different instant. Alarms and RRULE are
+groups too: transferable, never hand-typed (DavPunk does not author RRULEs).
+`description` stays atomic to preserve inline-checklist integrity.
+
+**Default centre.** Whichever side is newer, whole-resource: `LAST-MODIFIED`,
+then `SEQUENCE`, then local. iCalendar has no per-property timestamps, so
+"latest" cannot be decided field by field; local wins the tie because it is the
+edit the user can still remember making.
+
+**`resolution_for(state)`** picks the cheapest resolution that expresses the
+result: identical to the server's version → `restore_server` (no PUT at all),
+anything else → `merge`.
+
+**Skip** sets `conflict_queue.deferred_at`. The task stays in `conflict` and
+stays badged; it is simply not re-offered until the server side changes. Only a
+user-initiated sync walks the queue — the periodic one would raise a window
+mid-keystroke.
 
 `resolve_conflict(conflict_id, resolution, merged_task, conn)` — all five paths
 inside one `tx()`:
@@ -1024,10 +1055,17 @@ Task       n              new task
            p / t / s      priority / tags / due date
 Kanban     h / l          move card to previous / next column
            H / L          focus previous / next column
-Conflict   l / s          take local / server for the focused field
-           a / A          take all local / all server
-           Enter          save resolution
+Merge      ← / s          take the server value into the result
+           → / l          take my value into the result
+           j / k          next / previous field
+           a / A          take all mine / all server
+           Enter          accept the result
+           Esc            skip — resolve at a later sync
 ```
+
+The merge window's letter keys are handled on the **table**, never dialog-wide:
+the centre column is a live editor, and a dialog-wide `l` could not type the
+letter `l`.
 
 Overrides live in `[davpunk.keys]`, validated at load: duplicate bindings are a
 config error, never silently last-wins. **Hard requirement:** every action is
@@ -1429,7 +1467,9 @@ verify_tls     = true
 # Edit → Change status.
 # folded starts a column collapsed to a strip of its name and count, still a
 # drop target.  A startup default: clicking a column name folds and unfolds it,
-# and that is not written back.
+# and that is not written back.  The COMPLETED and CANCELLED columns start
+# folded regardless when show_completed is false — nothing they could hold is
+# on the board.
 columns = [
   {id = "todo",        label = "To Do"                                   },
   {id = "needsaction", label = "Needs Action", status = "NEEDS-ACTION"   },

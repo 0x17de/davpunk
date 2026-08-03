@@ -163,7 +163,17 @@ def _v1_rev8_initial(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
 
 
-MIGRATIONS = [_v1_rev8_initial]  # index+1 == target user_version
+def _v2_conflict_deferred_at(conn: sqlite3.Connection) -> None:
+    """*Skip* on the merge window: defer this conflict to a later sync.
+
+    NULL means "never skipped".  Cleared again whenever the server side of the
+    conflict is refreshed, so a genuinely newer server version comes back to the
+    user instead of staying hidden behind an old decision.
+    """
+    conn.execute("ALTER TABLE conflict_queue ADD COLUMN deferred_at INTEGER")
+
+
+MIGRATIONS = [_v1_rev8_initial, _v2_conflict_deferred_at]  # index+1 == target user_version
 SCHEMA_VERSION = len(MIGRATIONS)
 
 
@@ -840,7 +850,14 @@ def upsert_conflict(
         ON CONFLICT (task_id) WHERE resolved = 0 DO UPDATE SET
           remote_raw_ics = excluded.remote_raw_ics,   -- refresh the server side
           remote_etag    = excluded.remote_etag,      -- NULL if server deleted
-          detected_at    = excluded.detected_at
+          detected_at    = excluded.detected_at,
+          -- A refreshed server side is a new question, so a previous "skip"
+          -- no longer answers it.
+          deferred_at    = CASE
+                             WHEN remote_raw_ics IS excluded.remote_raw_ics
+                               THEN deferred_at
+                             ELSE NULL
+                           END
           -- local_raw_ics is deliberately NOT refreshed: it is the snapshot the
           -- user's pending edit is based on, and must stay stable while the
           -- conflict dialog is open
@@ -849,14 +866,30 @@ def upsert_conflict(
     )
 
 
-def open_conflicts(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+def open_conflicts(conn: sqlite3.Connection, *, include_deferred: bool = True) -> list[sqlite3.Row]:
+    """Every open conflict, oldest first.
+
+    ``include_deferred=False`` leaves out the ones the user skipped — that is
+    the list the merge window walks after a sync, so that skipping means "not
+    now" rather than "ask me again in two minutes".
+    """
+    deferred = "" if include_deferred else "AND c.deferred_at IS NULL "
     return list(
         conn.execute(
             "SELECT c.*, t.summary, t.uid, t.calendar_id FROM conflict_queue c "
-            "JOIN tasks t ON t.id = c.task_id WHERE c.resolved = 0 "
+            f"JOIN tasks t ON t.id = c.task_id WHERE c.resolved = 0 {deferred}"
             "ORDER BY c.detected_at"
         )
     )
+
+
+def defer_conflict(conflict_id: int, conn: sqlite3.Connection) -> None:
+    """*Skip* — leave the conflict open, but stop offering it every sync."""
+    with tx(conn):
+        conn.execute(
+            "UPDATE conflict_queue SET deferred_at = ? WHERE id = ? AND resolved = 0",
+            (now(), conflict_id),
+        )
 
 
 # ------------------------------------------------------------ pending changes

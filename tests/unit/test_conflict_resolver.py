@@ -7,18 +7,22 @@ import pytest
 from davpunk.conflict import resolver
 from davpunk.conflict.resolver import (
     ConflictError,
+    MergeState,
     Mode,
     Resolution,
+    Side,
     diff,
     load_conflict,
     merge_from_selection,
     mode_of,
+    newer_side,
+    resolution_for,
     resolve_conflict,
 )
 from davpunk.core import cache
 from davpunk.core.cache import TaskConflictError
 from davpunk.core.ical_parser import new_resource
-from davpunk.models.task import Status, SyncState, Task
+from davpunk.models.task import Alarm, AlarmRelated, Status, SyncState, Task
 
 
 def ics(uid="c1", **kwargs) -> str:
@@ -124,6 +128,157 @@ def test_loading_a_resolved_conflict_is_refused(conn, conflicted):
 
 def test_diff_tolerates_a_missing_side():
     assert all(d.remote is None for d in diff(Task(uid="a", summary="s"), None))
+
+
+def test_a_due_value_and_its_tzid_are_one_row(conn, conflicted):
+    """Half a DUE is a different instant, so the two never travel apart."""
+    _, conflict_id = conflicted(
+        local=ics(due_value="20260731T170000", due_tzid="Europe/Berlin"),
+        remote=ics(due_value="20260731T170000", due_tzid="America/New_York"),
+    )
+    view = load_conflict(conflict_id, conn)
+
+    due = view.diff_for("due")
+    assert due.differs
+    assert due.values(Side.REMOTE) == {
+        "due_value": "20260731T170000",
+        "due_tzid": "America/New_York",
+    }
+
+
+# -------------------------------------------------------------- merge state
+
+
+def test_the_centre_starts_from_the_side_last_modified(conn, conflicted):
+    _, conflict_id = conflicted(
+        local=ics(summary="Mine", last_modified=1000),
+        remote=ics(summary="Theirs", last_modified=2000),
+    )
+    view = load_conflict(conflict_id, conn)
+
+    assert newer_side(view) is Side.REMOTE
+    assert MergeState(view).apply().summary == "Theirs"
+
+
+def test_without_timestamps_the_local_side_wins_the_tie(conn, conflicted):
+    """The edit the user can still remember making, and the one that would
+    otherwise vanish without a trace."""
+    _, conflict_id = conflicted(local=ics(summary="Mine"), remote=ics(summary="Theirs"))
+    view = load_conflict(conflict_id, conn)
+
+    assert newer_side(view) is Side.LOCAL
+    assert MergeState(view).apply().summary == "Mine"
+
+
+def test_sequence_breaks_a_last_modified_tie(conn, conflicted):
+    _, conflict_id = conflicted(
+        local=ics(summary="Mine", last_modified=1000, sequence=1),
+        remote=ics(summary="Theirs", last_modified=1000, sequence=4),
+    )
+    assert newer_side(load_conflict(conflict_id, conn)) is Side.REMOTE
+
+
+def test_an_arrow_moves_one_group_across(conn, conflicted):
+    _, conflict_id = conflicted(
+        local=ics(summary="Mine", location="Here", last_modified=2000),
+        remote=ics(summary="Theirs", location="There", last_modified=1000),
+    )
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.take("summary", Side.REMOTE)
+
+    merged = state.apply()
+    assert (merged.summary, merged.location) == ("Theirs", "Here")
+
+
+def test_taking_a_due_takes_its_tzid_with_it(conn, conflicted):
+    """The bug a field-by-field merge invites: the server's time, my zone."""
+    _, conflict_id = conflicted(
+        local=ics(due_value="20260731T170000", due_tzid="Europe/Berlin"),
+        remote=ics(due_value="20260801T090000", due_tzid="America/New_York"),
+    )
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.take("due", Side.REMOTE)
+
+    merged = state.apply()
+    assert (merged.due_value, merged.due_tzid) == ("20260801T090000", "America/New_York")
+
+
+def test_the_servers_alarms_can_be_taken(conn, conflicted):
+    """They used to be dropped wholesale: the merge was always local-based."""
+    alarm = Alarm(related=AlarmRelated.END, trigger_offset=-3600)
+    # A relative alarm needs its anchor, or the parser drops it.
+    task_id, conflict_id = conflicted(
+        local=ics(due_value="20260731"),
+        remote=ics(due_value="20260731", alarms=[alarm]),
+    )
+
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.take("alarms", Side.REMOTE)
+    resolution, merged = resolution_for(state)
+    resolve_conflict(conflict_id, resolution, merged, conn)
+
+    rows = conn.execute(
+        "SELECT trigger_offset FROM valarms WHERE task_id = ?", (task_id,)
+    ).fetchall()
+    assert [row["trigger_offset"] for row in rows] == [-3600]
+
+
+def test_a_hand_typed_centre_value_reaches_the_database(conn, conflicted):
+    task_id, conflict_id = conflicted(local=ics(summary="Mine"), remote=ics(summary="Theirs"))
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.edit("summary", {"summary": "Neither"})
+
+    assert state.origin("summary") is None  # "edited"
+    resolution, merged = resolution_for(state)
+    resolve_conflict(conflict_id, resolution, merged, conn)
+    assert cache.get_task_row(task_id, conn)["summary"] == "Neither"
+
+
+def test_typing_one_sides_value_is_recorded_as_taking_that_side(conn, conflicted):
+    """Provenance has to match what the user sees, however they got there."""
+    _, conflict_id = conflicted(local=ics(summary="Mine"), remote=ics(summary="Theirs"))
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.edit("summary", {"summary": "Theirs"})
+
+    assert state.origin("summary") is Side.REMOTE
+
+
+def test_take_all_moves_every_group(conn, conflicted):
+    _, conflict_id = conflicted(
+        local=ics(summary="Mine", location="Here"),
+        remote=ics(summary="Theirs", location="There"),
+    )
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.take_all(Side.REMOTE)
+
+    merged = state.apply()
+    assert (merged.summary, merged.location) == ("Theirs", "There")
+
+
+# -------------------------------------------------------------- resolution_for
+
+
+def test_a_result_equal_to_the_server_is_a_restore_not_a_put(conn, conflicted):
+    """The server already holds those bytes; PUTing them back is churn."""
+    _, conflict_id = conflicted()
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.take_all(Side.REMOTE)
+
+    resolution, merged = resolution_for(state)
+    assert (resolution, merged) == (Resolution.RESTORE_SERVER, None)
+
+    resolve_conflict(conflict_id, resolution, merged, conn)
+    assert conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0] == 0
+
+
+def test_any_other_result_is_a_merge(conn, conflicted):
+    _, conflict_id = conflicted()
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.take_all(Side.LOCAL)
+
+    resolution, merged = resolution_for(state)
+    assert resolution is Resolution.MERGE
+    assert merged.summary == "Local edit"
 
 
 # ------------------------------------------------------------------- merge

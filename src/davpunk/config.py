@@ -64,12 +64,13 @@ DEFAULT_KEYS: dict[str, str] = {
     "card_next_column": "l",
     "focus_prev_column": "H",
     "focus_next_column": "L",
-    # conflict dialog
+    # merge window / conflict dialog
     "take_local": "l",
     "take_server": "s",
     "take_all_local": "a",
     "take_all_server": "A",
     "save_resolution": "Return",
+    "skip_resolution": "Escape",
 }
 
 #: Actions that share a keystroke legitimately, because they live in different
@@ -85,6 +86,7 @@ KEY_CONTEXTS: dict[str, str] = {
     "take_all_local": "conflict",
     "take_all_server": "conflict",
     "save_resolution": "conflict",
+    "skip_resolution": "conflict",
 }
 
 
@@ -115,7 +117,8 @@ class KanbanColumn(BaseModel):
     #: targets and worth counting, and worth almost none of the width they
     #: take up.  A startup default only — clicking a column name folds and
     #: unfolds it, and that is not written back, the same way "show
-    #: completed" is not.
+    #: completed" is not.  With "show completed" off at startup the finished
+    #: columns fold whatever this says: they can hold nothing else.
     folded: bool = False
 
 

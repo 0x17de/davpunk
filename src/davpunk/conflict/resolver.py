@@ -5,18 +5,23 @@ Three dialog modes, distinguished by which side of the conflict row is NULL:
 ===============  ================  ======  ==================================
 ``local_raw_ics``  ``remote_raw_ics``  Mode  Buttons
 ===============  ================  ======  ==================================
-set              set               A       Take all local · Take all server ·
-                                           Merge & save
+set              set               A       three-pane merge window: Accept · Skip
 NULL             set               A′      Delete anyway · Keep server version
 set              NULL              B       Recreate on server · Accept deletion
 ===============  ================  ======  ==================================
 
-*Take all local* maps to ``merge`` with every field taken from the local
-column; *Take all server* maps to ``restore_server``.
+Mode A is a **merge**, not a choice of side: :class:`MergeState` holds one
+decision per :class:`FieldGroup` — take the server's, take mine, or a value the
+user typed — and :func:`resolution_for` turns the result into the cheapest
+resolution that expresses it.
+
+Fields travel in **groups** because some of them are only meaningful together:
+``DUE`` without its ``TZID`` is a different instant, so the two move as one.
 """
 
 from __future__ import annotations
 
+import copy
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -52,21 +57,83 @@ ALLOWED: dict[Mode, tuple[Resolution, ...]] = {
     Mode.SERVER_DELETED: (Resolution.RECREATE, Resolution.ACCEPT_DELETION),
 }
 
-#: Fields compared side by side in the dialog.
-DIFF_FIELDS = (
-    "summary",
-    "description",
-    "status",
-    "priority",
-    "percent_complete",
-    "due_value",
-    "dtstart_value",
-    "location",
-    "url",
-    "categories",
+
+class Side(StrEnum):
+    """Which column of the merge window a value came from."""
+
+    REMOTE = "remote"
+    LOCAL = "local"
+
+    @property
+    def other(self) -> Side:
+        return Side.LOCAL if self is Side.REMOTE else Side.REMOTE
+
+
+class FieldKind(StrEnum):
+    """How the merge window renders and edits a group."""
+
+    TEXT = "text"
+    MULTILINE = "multiline"
+    STATUS = "status"
+    PRIORITY = "priority"
+    PERCENT = "percent"
+    DATETIME = "datetime"
+    TAGS = "tags"
+    OPAQUE = "opaque"  # shown and transferable, but never hand-edited
+
+
+@dataclass(frozen=True)
+class FieldGroup:
+    """One row of the merge window.
+
+    ``fields`` move together or not at all.  A ``DUE`` value carried over
+    without its ``TZID`` names a different instant, which is exactly the kind of
+    silent corruption a merge window exists to prevent.
+    """
+
+    name: str
+    label: str
+    fields: tuple[str, ...]
+    kind: FieldKind
+
+    @property
+    def primary(self) -> str:
+        return self.fields[0]
+
+
+#: The rows of the merge window, in the order they are shown.
+DIFF_GROUPS: tuple[FieldGroup, ...] = (
+    FieldGroup("summary", "Summary", ("summary",), FieldKind.TEXT),
+    FieldGroup("description", "Description", ("description",), FieldKind.MULTILINE),
+    FieldGroup("status", "Status", ("status",), FieldKind.STATUS),
+    FieldGroup("priority", "Priority", ("priority",), FieldKind.PRIORITY),
+    FieldGroup("percent_complete", "% complete", ("percent_complete",), FieldKind.PERCENT),
+    FieldGroup("due", "Due", ("due_value", "due_tzid"), FieldKind.DATETIME),
+    FieldGroup("dtstart", "Start", ("dtstart_value", "dtstart_tzid"), FieldKind.DATETIME),
+    FieldGroup("location", "Location", ("location",), FieldKind.TEXT),
+    FieldGroup("url", "URL", ("url",), FieldKind.TEXT),
+    FieldGroup("categories", "Tags", ("categories",), FieldKind.TAGS),
+    FieldGroup("alarms", "Alarms", ("alarms",), FieldKind.OPAQUE),
+    FieldGroup("rrule", "Recurrence", ("rrule",), FieldKind.OPAQUE),
 )
 
-#: Fields taken wholesale from one side or the other, never sub-field merged.
+GROUPS_BY_NAME: dict[str, FieldGroup] = {group.name: group for group in DIFF_GROUPS}
+
+#: Every model field the merge window can carry across, flattened.
+DIFF_FIELDS: tuple[str, ...] = tuple(f for group in DIFF_GROUPS for f in group.fields)
+
+#: Everything a resolution writes: the diffed fields plus the ones that ride
+#: along with the base task.  :func:`resolution_for` compares over these, so the
+#: "this is just the server's version" shortcut can never quietly drop one.
+MERGED_FIELDS: tuple[str, ...] = (
+    *DIFF_FIELDS,
+    "completed",
+    "parent_uid",
+    "davpunk_order",
+    "kanban_col",
+)
+
+#: Groups taken wholesale from one side or the other, never sub-field merged.
 #: ``description`` is atomic to preserve inline-checklist integrity.
 ATOMIC_FIELDS = frozenset({"description"})
 
@@ -77,17 +144,39 @@ class ConflictError(Exception):
 
 @dataclass
 class FieldDiff:
-    field: str
-    local: Any
-    remote: Any
+    """One group's value on each side."""
+
+    group: FieldGroup
+    local_values: dict[str, Any]
+    remote_values: dict[str, Any]
+
+    @property
+    def field(self) -> str:
+        return self.group.name
+
+    @property
+    def label(self) -> str:
+        return self.group.label
+
+    @property
+    def local(self) -> Any:
+        return self.local_values[self.group.primary]
+
+    @property
+    def remote(self) -> Any:
+        return self.remote_values[self.group.primary]
 
     @property
     def differs(self) -> bool:
-        return self.local != self.remote
+        return self.local_values != self.remote_values
 
     @property
     def atomic(self) -> bool:
-        return self.field in ATOMIC_FIELDS
+        return self.group.name in ATOMIC_FIELDS
+
+    def values(self, side: Side) -> dict[str, Any]:
+        source = self.remote_values if Side(side) is Side.REMOTE else self.local_values
+        return copy.deepcopy(source)
 
 
 @dataclass
@@ -102,6 +191,7 @@ class ConflictView:
     remote: Task | None
     remote_etag: str | None
     diffs: list[FieldDiff]
+    deferred_at: int | None = None
 
     @property
     def resolutions(self) -> tuple[Resolution, ...]:
@@ -110,6 +200,15 @@ class ConflictView:
     @property
     def changed(self) -> list[FieldDiff]:
         return [d for d in self.diffs if d.differs]
+
+    def diff_for(self, group: str) -> FieldDiff:
+        for candidate in self.diffs:
+            if candidate.field == group:
+                return candidate
+        raise KeyError(group)
+
+    def task_for(self, side: Side) -> Task | None:
+        return self.remote if Side(side) is Side.REMOTE else self.local
 
 
 def mode_of(local_raw_ics: str | None, remote_raw_ics: str | None) -> Mode:
@@ -146,6 +245,7 @@ def load_conflict(conflict_id: int, conn: sqlite3.Connection) -> ConflictView:
         remote=remote,
         remote_etag=row["remote_etag"],
         diffs=diff(local, remote),
+        deferred_at=row["deferred_at"],
     )
 
 
@@ -160,35 +260,157 @@ def _parse_or_none(raw_ics: str | None) -> Task | None:
 
 
 def diff(local: Task | None, remote: Task | None) -> list[FieldDiff]:
-    """Field-by-field comparison for the dialog's table."""
+    """Group-by-group comparison for the merge window's table."""
     return [
         FieldDiff(
-            field=name,
-            local=getattr(local, name, None) if local else None,
-            remote=getattr(remote, name, None) if remote else None,
+            group=group,
+            local_values=_group_values(local, group),
+            remote_values=_group_values(remote, group),
         )
-        for name in DIFF_FIELDS
+        for group in DIFF_GROUPS
     ]
 
 
-def merge_from_selection(view: ConflictView, take_remote: set[str] | None = None) -> Task:
-    """Build the merged task from a per-field selection.
+def _group_values(task: Task | None, group: FieldGroup) -> dict[str, Any]:
+    if task is None:
+        return dict.fromkeys(group.fields)
+    return {name: copy.deepcopy(getattr(task, name)) for name in group.fields}
 
-    ``take_remote`` names the fields the user chose the server's value for;
+
+def newer_side(view: ConflictView) -> Side:
+    """Which side the centre column starts from — the "latest" of the two.
+
+    iCalendar carries no per-property timestamps, so *latest* is necessarily a
+    judgement about the whole resource rather than about one field:
+    ``LAST-MODIFIED`` first, then ``SEQUENCE``, then local.  Local wins the tie
+    because it is the edit the user can still remember making, and because it
+    is the one that would otherwise be lost without a trace.
+    """
+    if view.remote is None:
+        return Side.LOCAL
+    if view.local is None:
+        return Side.REMOTE
+
+    local_modified, remote_modified = view.local.last_modified, view.remote.last_modified
+    if local_modified is not None and remote_modified is not None:
+        if remote_modified > local_modified:
+            return Side.REMOTE
+        if local_modified > remote_modified:
+            return Side.LOCAL
+    elif remote_modified is not None and local_modified is None:
+        return Side.REMOTE
+
+    if view.remote.sequence > view.local.sequence:
+        return Side.REMOTE
+    return Side.LOCAL
+
+
+class MergeState:
+    """The centre column: one decision per group, plus any hand-edited values.
+
+    A decision is either a :class:`Side` or — once the user has typed something
+    that matches neither side — an explicit value.  Nothing here touches the
+    database; :func:`resolution_for` turns the accumulated decisions into a
+    resolution and a task.
+    """
+
+    def __init__(self, view: ConflictView, sides: dict[str, Side] | None = None) -> None:
+        self.view = view
+        self.default_side = newer_side(view)
+        self.sides: dict[str, Side] = {group.name: self.default_side for group in DIFF_GROUPS}
+        if sides:
+            self.sides.update({name: Side(side) for name, side in sides.items()})
+        self.edits: dict[str, dict[str, Any]] = {}
+
+    # ------------------------------------------------------------- decisions
+
+    def take(self, group: str, side: Side | str) -> None:
+        """Transfer one side into the centre, discarding any edit of that row."""
+        self.sides[group] = Side(side)
+        self.edits.pop(group, None)
+
+    def take_all(self, side: Side | str) -> None:
+        for group in DIFF_GROUPS:
+            self.take(group.name, side)
+
+    def edit(self, group: str, values: dict[str, Any]) -> None:
+        """Record a hand-typed centre value.
+
+        Typing a value that happens to equal one side is recorded as *taking*
+        that side: the row is then no longer "edited", which is what the user
+        sees and what the provenance marker has to say.
+        """
+        for side in (Side.LOCAL, Side.REMOTE):
+            if values == self.side_values(group, side):
+                self.take(group, side)
+                return
+        self.edits[group] = copy.deepcopy(values)
+
+    # ----------------------------------------------------------------- reads
+
+    def side_values(self, group: str, side: Side | str) -> dict[str, Any]:
+        """One side's values, falling back to the other when that side is gone."""
+        side = Side(side)
+        if self.view.task_for(side) is None:
+            side = side.other
+        return self.view.diff_for(group).values(side)
+
+    def values(self, group: str) -> dict[str, Any]:
+        if group in self.edits:
+            return copy.deepcopy(self.edits[group])
+        return self.side_values(group, self.sides[group])
+
+    def origin(self, group: str) -> Side | None:
+        """The side this row came from, or ``None`` when it was hand-edited."""
+        return None if group in self.edits else self.sides[group]
+
+    def differs(self, group: str) -> bool:
+        return self.view.diff_for(group).differs
+
+    # ---------------------------------------------------------------- result
+
+    def apply(self) -> Task:
+        """The task the centre column describes."""
+        base = self.view.local or self.view.remote
+        if base is None:
+            raise ConflictError("nothing to merge")
+
+        merged = base.model_copy(deep=True)
+        for group in DIFF_GROUPS:
+            for name, value in self.values(group.name).items():
+                setattr(merged, name, value)
+        return merged.canonicalized()
+
+
+def resolution_for(state: MergeState) -> tuple[Resolution, Task | None]:
+    """The cheapest resolution that expresses the centre column.
+
+    A result identical to the server's version is a ``restore_server``, not a
+    ``merge``: the server already holds those bytes, so PUTing them back is
+    churn and one more chance to lose a race.
+    """
+    merged = state.apply()
+    remote = state.view.remote
+    if remote is not None and all(
+        getattr(merged, name) == getattr(remote, name) for name in MERGED_FIELDS
+    ):
+        return Resolution.RESTORE_SERVER, None
+    return Resolution.MERGE, merged
+
+
+def merge_from_selection(view: ConflictView, take_remote: set[str] | None = None) -> Task:
+    """Build the merged task from a per-group selection.
+
+    ``take_remote`` names the groups the user chose the server's value for;
     everything else keeps the local value.  *Take all local* is an empty set,
     which is why it is a ``merge`` and not its own resolution.
     """
     take_remote = take_remote or set()
-    base = view.local or view.remote
-    if base is None:
-        raise ConflictError("nothing to merge")
-
-    merged = base.model_copy(deep=True)
-    for field in DIFF_FIELDS:
-        source = view.remote if field in take_remote else view.local
-        if source is not None:
-            setattr(merged, field, getattr(source, field))
-    return merged.canonicalized()
+    sides = {
+        group.name: Side.REMOTE if group.name in take_remote else Side.LOCAL
+        for group in DIFF_GROUPS
+    }
+    return MergeState(view, sides).apply()
 
 
 # ------------------------------------------------------------------ resolving
@@ -317,6 +539,7 @@ def _write_fields(task_id: str, task: Task, conn: sqlite3.Connection) -> None:
         "due_value",
         "due_tzid",
         "completed",
+        "rrule",
         "url",
         "location",
         "parent_uid",

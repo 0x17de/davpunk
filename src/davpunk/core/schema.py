@@ -178,6 +178,8 @@ CREATE TABLE conflict_queue (
     remote_etag    TEXT,
     detected_at    INTEGER NOT NULL,
     resolved       INTEGER NOT NULL DEFAULT 0
+    -- deferred_at INTEGER is added by migration v2 (cache.MIGRATIONS), NOT
+    -- here: this DDL is v1 and every existing database has already run it.
 );
 -- At most ONE open conflict per task, enforced by the database so a future
 -- detection site cannot reintroduce the unbounded-insert bug.

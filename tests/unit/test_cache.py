@@ -135,6 +135,46 @@ def test_partial_unique_index_permits_one_open_conflict_only(conn, synced_task):
     assert rows[0]["remote_raw_ics"] == "remote-newer"
 
 
+def test_a_skipped_conflict_drops_out_of_the_walked_queue(conn, synced_task):
+    """*Skip* means "not now", not "ask me again in two minutes"."""
+    task_id = synced_task()
+    with cache.tx(conn):
+        cache.upsert_conflict(task_id, "local", "remote", 'W/"2"', conn)
+    conflict_id = cache.open_conflicts(conn)[0]["id"]
+
+    cache.defer_conflict(conflict_id, conn)
+
+    assert len(cache.open_conflicts(conn)) == 1  # still open, still badged
+    assert cache.open_conflicts(conn, include_deferred=False) == []
+
+
+def test_a_newer_server_version_re_raises_a_skipped_conflict(conn, synced_task):
+    """A refreshed server side is a new question, so an old skip stops
+    answering it."""
+    task_id = synced_task()
+    with cache.tx(conn):
+        cache.upsert_conflict(task_id, "local", "remote", 'W/"2"', conn)
+    cache.defer_conflict(cache.open_conflicts(conn)[0]["id"], conn)
+
+    with cache.tx(conn):
+        cache.upsert_conflict(task_id, "local", "remote-newer", 'W/"3"', conn)
+
+    assert len(cache.open_conflicts(conn, include_deferred=False)) == 1
+
+
+def test_re_detecting_the_same_server_version_keeps_the_skip(conn, synced_task):
+    """Every sync re-detects the conflict; that is not new information."""
+    task_id = synced_task()
+    with cache.tx(conn):
+        cache.upsert_conflict(task_id, "local", "remote", 'W/"2"', conn)
+    cache.defer_conflict(cache.open_conflicts(conn)[0]["id"], conn)
+
+    with cache.tx(conn):
+        cache.upsert_conflict(task_id, "local", "remote", 'W/"2"', conn)
+
+    assert cache.open_conflicts(conn, include_deferred=False) == []
+
+
 def test_resolved_conflicts_do_not_block_a_new_one(conn, synced_task):
     task_id = synced_task()
     with cache.tx(conn):

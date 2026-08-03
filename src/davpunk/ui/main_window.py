@@ -10,6 +10,7 @@ from PySide6.QtGui import QAction, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
+    QDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -21,7 +22,7 @@ from PySide6.QtWidgets import (
 )
 
 from davpunk import paths
-from davpunk.conflict.resolver import load_conflict, resolve_conflict
+from davpunk.conflict.resolver import ConflictError, Mode, load_conflict, resolve_conflict
 from davpunk.core import cache
 from davpunk.core.cache import CacheError, ReadOnlyResourceError, TaskConflictError
 from davpunk.core.locking import is_syncing
@@ -29,6 +30,7 @@ from davpunk.models.task import Status, Task
 from davpunk.ui import viewmodel as vm
 from davpunk.ui.dialogs import ConflictDialog, KeymapOverlay, MoveDialog, TaskEditor
 from davpunk.ui.keymap import Keymap, is_chord
+from davpunk.ui.merge_dialog import MergeDialog
 from davpunk.ui.sync_worker import SyncController
 from davpunk.ui.views import KanbanView, ListView, SearchView
 
@@ -64,6 +66,8 @@ class MainWindow(QMainWindow):
         self.keymap = Keymap(config)
         self._fingerprint = (0, 0)
         self._chord_prefix = ""
+        #: Remotes whose next syncFinished may raise the merge window.
+        self._prompt_conflicts_for: set[str] = set()
         #: What a cut is holding.  In-process: a local task id means nothing
         #: outside it, and the system clipboard would only carry noise.
         self.clipboard = vm.TaskClipboard()
@@ -852,15 +856,48 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "No conflict", "This conflict is already resolved.")
             return
 
-        view = load_conflict(row["id"], self.conn)
-        dialog = ConflictDialog(view, self.keymap, self)
-        if dialog.exec() != ConflictDialog.DialogCode.Accepted or dialog.resolution is None:
-            return
+        self._resolve_one(row["id"])
+        self.refresh()
+
+    def _resolve_one(self, conflict_id: int) -> bool:
+        """One conflict, start to finish.  ``False`` means the user skipped it.
+
+        Mode A opens the three-pane merge window; the delete-side modes keep
+        their two-button dialog, because there is nothing to merge when one
+        side of the task does not exist.
+        """
+        try:
+            view = load_conflict(conflict_id, self.conn)
+        except ConflictError:
+            return True  # resolved from elsewhere while the queue was walking
+
+        dialog = (
+            MergeDialog(view, self.keymap, self)
+            if view.mode is Mode.BOTH_CHANGED
+            else ConflictDialog(view, self.keymap, self)
+        )
+        if dialog.exec() != QDialog.DialogCode.Accepted or dialog.resolution is None:
+            if dialog.skipped:
+                cache.defer_conflict(conflict_id, self.conn)
+                self.statusBar().showMessage(
+                    "Skipped — this conflict comes back at a later sync.", 5000
+                )
+            return False
 
         try:
             resolve_conflict(view.conflict_id, dialog.resolution, dialog.merged, self.conn)
         except Exception as exc:
             QMessageBox.critical(self, "Could not resolve", str(exc))
+        return True
+
+    def resolve_open_conflicts(self) -> None:
+        """Walk the conflicts the user has not skipped, one window at a time.
+
+        Only ever called after a sync the user asked for: a window that opens
+        by itself while they are typing is worse than a badge that waits.
+        """
+        for row in cache.open_conflicts(self.conn, include_deferred=False):
+            self._resolve_one(row["id"])
         self.refresh()
 
     def show_attention(self) -> None:
@@ -892,14 +929,24 @@ class MainWindow(QMainWindow):
     def sync_now(self) -> None:
         """A user-initiated sync surfaces SyncBusy; the periodic one does not."""
         self.statusBar().showMessage("Syncing…")
+        # Only a sync the user asked for is allowed to raise a merge window:
+        # the periodic one runs every few minutes and would interrupt whatever
+        # they are doing.
+        self._prompt_conflicts_for = {remote.id for remote in self.config.remotes}
         self.sync.sync_all()
 
     def _on_sync_finished(self, remote_id: str, summary: str) -> None:
         self.statusBar().showMessage(summary, 5000)
         self.refresh()
+        if remote_id in self._prompt_conflicts_for:
+            self._prompt_conflicts_for.discard(remote_id)
+            self.resolve_open_conflicts()
 
     def _on_sync_failed(self, remote_id: str, error: str) -> None:
         self.statusBar().showMessage(f"{remote_id}: {error}", 10000)
+        # Same bookkeeping as a success, or a failed sync would leave the
+        # promise of a merge window hanging over some later run.
+        self._prompt_conflicts_for.discard(remote_id)
         self.refresh()
 
     def _on_progress(self, remote_id, phase, done, total, error) -> None:

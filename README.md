@@ -427,6 +427,11 @@ columns = [
 That is the starting state only. Folding and unfolding during a session is not
 written back, the same as *show completed* below.
 
+The COMPLETED and CANCELLED columns start folded whatever `folded` says whenever
+*show completed* is off at startup: the only cards they could hold are the ones
+that setting hides, so open they would be empty width. Clicking their names
+still opens them.
+
 ### Finished work
 
 Completed and cancelled tasks are hidden by default, in the list *and* on the
@@ -451,6 +456,37 @@ setting — the same reasoning as *show completed*.
 
 The full config reference — kanban columns, key bindings, MCP — is in
 [HLD.md §16](HLD.md).
+
+### When a task changed in two places
+
+If you edited a task and the server's copy moved too, DavPunk does not pick a
+winner. The task is badged `conflict`, refuses further edits, and opens a
+**merge window** — after a sync you asked for, or whenever you open the task.
+
+Three columns: the server's version on the left, **the result** in the middle,
+yours on the right. One row per field; the rows that actually differ are marked,
+the rest are dimmed. The middle starts out as whichever version is newer, and
+you change it in two ways:
+
+- the arrows — or `←` / `→`, `j`/`k` to move between fields — copy one side's
+  value into the middle;
+- or you type into the middle directly, and the result is a value neither side
+  had.
+
+The middle column is what gets saved. **Accept** writes it and queues the
+update; **Skip** leaves the conflict alone and brings it back at a later sync,
+which is the right answer when you want to look at something before deciding.
+
+Values that only mean something together move together: a due date carries its
+time zone with it, so you can never end up with the server's time in your zone.
+
+When a task exists on only one side — you deleted it and the server changed it,
+or the other way round — there is nothing to merge, so those keep a plain
+two-button question (*Delete anyway* / *Keep the server's version*, or *Recreate
+on server* / *Accept deletion*), with the same *Skip*.
+
+`davpunk conflicts` lists what is open from the command line; resolving is a UI
+action.
 
 ## Changing settings later
 

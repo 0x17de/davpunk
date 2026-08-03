@@ -73,17 +73,18 @@ LABELS: dict[str, str] = {
     "card_next_column": "Card to next column",
     "focus_prev_column": "Focus previous column",
     "focus_next_column": "Focus next column",
-    "take_local": "Take local value",
-    "take_server": "Take server value",
-    "take_all_local": "Take all local",
+    "take_local": "Take my value into the result",
+    "take_server": "Take the server value into the result",
+    "take_all_local": "Take all mine",
     "take_all_server": "Take all server",
-    "save_resolution": "Save resolution",
+    "save_resolution": "Accept the result",
+    "skip_resolution": "Skip — resolve at a later sync",
 }
 
 CONTEXT_TITLES = {
     "global": "Global",
     "kanban": "Kanban",
-    "conflict": "Conflict dialog",
+    "conflict": "Merge window",
 }
 
 
