@@ -1010,6 +1010,20 @@ class KanbanView(QWidget):
         widget = self._focused_list()
         return _acting_tasks(widget.selectedItems()) if widget is not None else []
 
+    def selected_column(self) -> KanbanColumn | None:
+        """The column the selection is *shown* in, which is not always its own.
+
+        A grey context row stands in a column its task did not choose, and the
+        column it is drawn in is the one the user is looking at and pointing
+        at.  Asking the task where it belongs would answer about somewhere
+        else entirely, so anything that means "here, on the board" asks this.
+        """
+        widget = self._focused_list()
+        if widget is None:
+            return None
+        column_id = next((cid for cid, w in self.lists.items() if w is widget), None)
+        return next((c for c in self.columns if c.id == column_id), None)
+
     def move_to_column(self, task: Task, column_id: str) -> None:
         """Sets both STATUS and X-DAVPUNK-KANBAN-COL in one update."""
         column = next((c for c in self.columns if c.id == column_id), None)

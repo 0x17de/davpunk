@@ -1730,6 +1730,32 @@ def test_a_subtask_added_on_the_board_proposes_its_columns_status(window, make_t
     assert seen["status"] == NO_STATUS
 
 
+def test_a_subtask_added_on_a_context_row_proposes_the_column_it_is_drawn_in(
+    window, make_task, monkeypatch
+):
+    """A grey stand-in stands in a column its task did not choose, and the
+    column under the cursor is the one the user asked for — reading the status
+    off the *task* would file the new subtask in In Progress instead."""
+    cache.create_task_local(make_task("p", summary="parent", status=Status.IN_PROCESS), window.conn)
+    cache.create_task_local(make_task("c", summary="child", parent_uid="p"), window.conn)
+    kanban = _kanban(window)
+
+    column = kanban.lists["needsaction"]
+    context = column.topLevelItem(0)
+    assert context.text(0) == "parent"
+    column.setCurrentItem(context)
+
+    seen = {}
+    _accept_editor(monkeypatch, lambda e: seen.update(status=e.status.currentText()))
+    window.new_subtask()
+
+    assert seen["status"] == Status.NEEDS_ACTION.value
+    row = window.conn.execute(
+        "SELECT parent_uid, status FROM tasks WHERE summary = 'New task'"
+    ).fetchone()
+    assert (row["parent_uid"], row["status"]) == ("p", Status.NEEDS_ACTION.value)
+
+
 def test_a_subtask_added_in_the_list_view_proposes_nothing(window, make_task, monkeypatch):
     """Off the board there is no column to read a status from, and inventing
     one would set a field the user never touched."""

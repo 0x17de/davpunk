@@ -515,13 +515,19 @@ class MainWindow(QMainWindow):
         when you right-clicked a card in "To Do" puts the new task in a column
         you were not looking at.  Proposed, not imposed — the editor still
         shows it, and every other view leaves it unset.
+
+        The column asked is the one the row is *drawn* in, not the one its task
+        belongs to.  For an ordinary card the two are the same; for a grey
+        context row they are not, and "where you asked for it" is the column
+        under the cursor — asking the task instead would quietly file the new
+        subtask in whichever column its parent happens to live in.
         """
         if selected is None or not isinstance(self.current_view(), KanbanView):
             return None
-        column = vm.column_of(selected, self.kanban_view.columns)
+        column = self.kanban_view.selected_column()
         if column is None:
-            # Off the board entirely: the only honest proposal left is the
-            # status the selection itself carries.
+            # No column to read the selection out of — the only honest
+            # proposal left is the status the selection itself carries.
             return selected.status
         return Status(column.status) if column.status else None
 
