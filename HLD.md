@@ -810,6 +810,19 @@ so this is a two-way merge shown in three panes.
 carried over with the local zone is a different instant. Alarms and RRULE are
 groups too: transferable, never hand-typed (DavPunk does not author RRULEs).
 `description` stays atomic to preserve inline-checklist integrity.
+`status = (STATUS, X-DAVPUNK-KANBAN-COL)` because the override outranks the
+status it was set beside (§ *Kanban columns*, rule 1): a status from one side
+with an override from the other lands the card in a column its own status
+contradicts, and a card drag writes both in one call anyway.
+
+**Fields with no question in them.** `AUTO_FIELDS` — currently
+`X-DAVPUNK-ORDER` alone — has no row in the window. A position is written by
+dragging, never typed, so a wrong choice costs a re-drag rather than lost text:
+the newer side simply takes it, on the same whole-resource judgement below.
+Without this the merged task inherits it from the base, which is *always* local
+when local exists, so a newer server ordering could never win and take-all-server
+could not come out as a `restore_server`. `parent_uid` is deliberately **not**
+in the set: reparenting a subtask is something the user meant.
 
 **Default centre.** Whichever side is newer, whole-resource: `LAST-MODIFIED`,
 then `SEQUENCE`, then local. iCalendar has no per-property timestamps, so
@@ -819,6 +832,24 @@ edit the user can still remember making.
 **`resolution_for(state)`** picks the cheapest resolution that expresses the
 result: identical to the server's version → `restore_server` (no PUT at all),
 anything else → `merge`.
+
+### Auto-merge (`auto_resolve`)
+
+A reorder is a full PUT, and a rebalance is one per renumbered sibling, so two
+clients tidying the same list collide on a field the window does not even show —
+and mode A would open three panes with every row dimmed. So both detection sites
+(the pull's `_apply_one`, the push's 412) call `auto_resolve(task_id, conn)`
+immediately after `upsert_conflict`. When the two versions differ in nothing but
+`AUTO_FIELDS`, it seeds a `MergeState` and resolves through the ordinary paths:
+`restore_server` when the server's is the newer version (no PUT), a `merge`
+re-based on `remote_etag` when ours is (the next `If-Match` then succeeds). Two
+clients that merely raced on ETags without disagreeing land here too.
+
+The conflict row is written and resolved like any other, so the audit trail is
+the same. It is counted as `auto_merged`, never `conflicts`: the queue the merge
+window walks has nothing in it, and a badge would point at nothing. Modes A′ and
+B never qualify — a deletion is a decision, not a merge. It opens its own `tx()`
+and so is never called from inside one.
 
 **Skip** sets `conflict_queue.deferred_at`. The task stays in `conflict` and
 stays badged; it is simply not re-offered until the server side changes. Only a
@@ -1096,7 +1127,9 @@ midpoint. When a gap closes below 2, only the **contiguous run whose gaps
 actually closed** is renumbered, and unchanged siblings are not marked dirty.
 Drags within a 2 s window (`time.monotonic()`) coalesce into one rebalance, with
 a single "reordering N tasks" toast. Sort key is
-`(davpunk_order ASC NULLS LAST, uid ASC)`.
+`(davpunk_order ASC NULLS LAST, uid ASC)`. Each renumbered sibling is a PUT of
+its own, so two clients reordering one list collide — those collisions are
+auto-merged, latest wins, and never reach the merge window (§12).
 
 **Kanban columns.** (1) If `X-DAVPUNK-KANBAN-COL` is set **and** matches a
 configured column `id`, that column wins. (2) Otherwise, the first configured
@@ -1531,6 +1564,8 @@ file and the offending key, and does not crash.
   remote; moving between servers is a copy-then-delete the user performs.
 - Mobile sync or sync-adapter integration.
 - An "archive" concept — completed tasks are searchable via the search view.
-- Automatic conflict merging — resolution is always user-driven.
+- Automatic merging of anything the user could be asked about — content
+  resolution is always user-driven. The one exception is `AUTO_FIELDS` (§12):
+  list position is bookkeeping, not content, and latest wins.
 - Multi-user or shared-calendar ACL management.
 - Live config reload — changes require a restart.

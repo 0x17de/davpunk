@@ -40,6 +40,9 @@ class SyncResult:
     pulled: int = 0
     pushed: int = 0
     conflicts: int = 0
+    #: Ordering-only collisions, settled without asking.  Separate from
+    #: ``conflicts`` because they leave nothing for the user to do.
+    auto_merged: int = 0
     deleted: int = 0
     cancelled: bool = False
     skipped: bool = False
@@ -69,6 +72,8 @@ class SyncResult:
             parts.append(f"{self.up_to_date} already up to date")
         if self.conflicts:
             parts.append(f"{self.conflicts} conflict(s)")
+        if self.auto_merged:
+            parts.append(f"{self.auto_merged} auto-merged")
         if self.cancelled:
             parts.append("cancelled")
         return f"{self.remote_id}: " + ", ".join(parts)
@@ -155,6 +160,7 @@ class SyncRunner:
                 )
                 result.pulled += pull.applied
                 result.conflicts += pull.conflicts
+                result.auto_merged += pull.auto_merged
                 result.deleted += pull.deleted
                 result.up_to_date += int(pull.short_circuited)
 
@@ -167,6 +173,7 @@ class SyncRunner:
                 )
                 result.pushed += push.pushed
                 result.conflicts += push.conflicts
+                result.auto_merged += push.auto_merged
                 if push.cancelled or pull.cancelled:
                     result.cancelled = True
 

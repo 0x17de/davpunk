@@ -478,7 +478,16 @@ update; **Skip** leaves the conflict alone and brings it back at a later sync,
 which is the right answer when you want to look at something before deciding.
 
 Values that only mean something together move together: a due date carries its
-time zone with it, so you can never end up with the server's time in your zone.
+time zone with it, so you can never end up with the server's time in your zone,
+and a status carries the board column it was set beside.
+
+One thing never reaches that window. Dragging a task into a new position is a
+change like any other, so two clients tidying the same list collide — but where
+a card sits in a list is not a question worth interrupting anyone with. Those
+are merged on the spot and the most recent drag wins. You will see them counted
+as *auto-merged* in the sync report, and nothing is badged. If the same sync
+also brought a real disagreement — a summary, a due date — you still get the
+window for that.
 
 When a task exists on only one side — you deleted it and the server changed it,
 or the other way round — there is nothing to merge, so those keep a plain

@@ -16,6 +16,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
+from davpunk.conflict import resolver
 from davpunk.core import cache
 from davpunk.core.caldav_client import (
     CalDAVError,
@@ -47,6 +48,10 @@ class PullResult:
     imported: int = 0
     deleted: int = 0
     conflicts: int = 0
+    #: Conflicts settled without asking, counted apart from the ones that are
+    #: waiting for the user.  Reporting them as ``conflicts`` would badge a
+    #: queue that has nothing in it.
+    auto_merged: int = 0
     skipped: int = 0
     cancelled: bool = False
     short_circuited: bool = False
@@ -56,6 +61,7 @@ class PullResult:
 class PushResult:
     pushed: int = 0
     conflicts: int = 0
+    auto_merged: int = 0
     failed: int = 0
     cancelled: bool = False
 
@@ -408,6 +414,9 @@ def _apply_one(
     with cache.tx(conn):
         cache.upsert_conflict(row["id"], local_snapshot, parsed.raw_ics, etag, conn)
         cache.set_sync_state(row["id"], SyncState.CONFLICT, conn)
+    if resolver.auto_resolve(row["id"], conn):
+        result.auto_merged += 1
+        return
     result.conflicts += 1
 
 
@@ -669,6 +678,11 @@ def _push_update(
             cache.upsert_conflict(task_id, ics, remote.ics, remote.etag, conn)
             cache.set_sync_state(task_id, SyncState.CONFLICT, conn)
             # pending_changes is KEPT: the user's intent survives resolution.
+        if resolver.auto_resolve(task_id, conn):
+            # Ours newer → re-queued against remote.etag, so the next cycle's
+            # If-Match succeeds.  Theirs newer → restored, nothing left to send.
+            result.auto_merged += 1
+            return
         result.conflicts += 1
         return
     except NotFound:
@@ -856,6 +870,7 @@ def _accumulate_pull(total: PullResult, one: PullResult) -> None:
     total.imported += one.imported
     total.deleted += one.deleted
     total.conflicts += one.conflicts
+    total.auto_merged += one.auto_merged
     total.skipped += one.skipped
     total.cancelled = total.cancelled or one.cancelled
 
@@ -863,6 +878,7 @@ def _accumulate_pull(total: PullResult, one: PullResult) -> None:
 def _accumulate_push(total: PushResult, one: PushResult) -> None:
     total.pushed += one.pushed
     total.conflicts += one.conflicts
+    total.auto_merged += one.auto_merged
     total.failed += one.failed
     total.cancelled = total.cancelled or one.cancelled
 

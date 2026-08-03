@@ -2920,6 +2920,30 @@ def test_taking_everything_from_the_server_needs_no_put(qapp, conn, synced_task)
     assert dialog.resolution is Resolution.RESTORE_SERVER
 
 
+def test_the_status_row_carries_the_board_column_with_it(qapp, conn, synced_task):
+    """The override outranks the status it was set beside, so it is not a
+    separate decision — and there is no widget to type it into."""
+    task_id = synced_task("cf")
+    dialog = merge_dialog(
+        conn,
+        task_id,
+        _with(_with(ics("cf", "Same"), "STATUS:IN-PROCESS"), "X-DAVPUNK-KANBAN-COL:doing"),
+        _with(_with(ics("cf", "Same"), "STATUS:NEEDS-ACTION"), "X-DAVPUNK-KANBAN-COL:triage"),
+    )
+
+    dialog.take("status", Side.REMOTE)
+    assert dialog.state.values("status") == {"status": Status.NEEDS_ACTION, "kanban_col": "triage"}
+    # Shown, not hidden: two sides that disagree about the column alone would
+    # otherwise read identically in a row marked as differing.
+    assert dialog.table.item(2, 1).text() == "NEEDS-ACTION · triage"
+    assert dialog.table.item(2, 5).text() == "IN-PROCESS · doing"
+
+    # A status neither side had keeps the override of the side it came from.
+    dialog.editors["status"].widget.setCurrentText(Status.COMPLETED.value)
+    dialog._edited("status")
+    assert dialog.state.values("status") == {"status": Status.COMPLETED, "kanban_col": "triage"}
+
+
 def test_skipping_the_merge_window_decides_nothing(qapp, conn, synced_task):
     task_id = synced_task("cf")
     dialog = merge_dialog(conn, task_id, ics("cf", "Mine"), ics("cf", "Theirs"))

@@ -16,6 +16,7 @@ from davpunk.conflict.resolver import (
     merge_from_selection,
     mode_of,
     newer_side,
+    only_auto_differs,
     resolution_for,
     resolve_conflict,
 )
@@ -253,6 +254,144 @@ def test_take_all_moves_every_group(conn, conflicted):
 
     merged = state.apply()
     assert (merged.summary, merged.location) == ("Theirs", "There")
+
+
+# ------------------------------------------------------ fields with no question
+
+
+def test_the_status_carries_its_kanban_override(conn, conflicted):
+    """The board lets an override outrank the STATUS it was set beside, so a
+    status from one side with an override from the other contradicts itself."""
+    _, conflict_id = conflicted(
+        local=ics(status=Status.IN_PROCESS, kanban_col="doing"),
+        remote=ics(status=Status.NEEDS_ACTION, kanban_col="triage"),
+    )
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.take("status", Side.REMOTE)
+
+    merged = state.apply()
+    assert (merged.status, merged.kanban_col) == (Status.NEEDS_ACTION, "triage")
+
+
+def test_the_ordering_follows_the_newer_side_not_the_base(conn, conflicted):
+    """It has no row of its own, and the base is local whenever local exists —
+    so without a rule of its own the local position would always win."""
+    _, conflict_id = conflicted(
+        local=ics(summary="Mine", davpunk_order=1000, last_modified=1000),
+        remote=ics(summary="Theirs", davpunk_order=5000, last_modified=2000),
+    )
+    assert MergeState(load_conflict(conflict_id, conn)).apply().davpunk_order == 5000
+
+
+def test_moving_text_about_never_moves_the_ordering(conn, conflicted):
+    """Position is not part of the question the arrows answer."""
+    _, conflict_id = conflicted(
+        local=ics(summary="Mine", davpunk_order=1000, last_modified=2000),
+        remote=ics(summary="Theirs", davpunk_order=5000, last_modified=1000),
+    )
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.take("summary", Side.REMOTE)
+
+    assert state.apply().davpunk_order == 1000
+
+
+def test_take_all_server_restores_when_the_server_holds_the_newer_order(conn, conflicted):
+    """It used to fall through to a merge that PUT the stale local order back."""
+    _, conflict_id = conflicted(
+        local=ics(summary="Mine", davpunk_order=1000, last_modified=1000),
+        remote=ics(summary="Theirs", davpunk_order=5000, last_modified=2000),
+    )
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.take_all(Side.REMOTE)
+
+    assert resolution_for(state) == (Resolution.RESTORE_SERVER, None)
+
+
+def test_take_all_server_keeps_a_position_dragged_more_recently(conn, conflicted):
+    """Take-all-server answers the question about content; the ordering was
+    never in it, and a newer position is still the user's most recent drag."""
+    _, conflict_id = conflicted(
+        local=ics(summary="Mine", davpunk_order=1000, last_modified=2000),
+        remote=ics(summary="Theirs", davpunk_order=5000, last_modified=1000),
+    )
+    state = MergeState(load_conflict(conflict_id, conn))
+    state.take_all(Side.REMOTE)
+
+    resolution, merged = resolution_for(state)
+    assert (resolution, merged.summary, merged.davpunk_order) == (Resolution.MERGE, "Theirs", 1000)
+
+
+# ------------------------------------------------------------------ auto-merge
+
+
+def test_only_the_ordering_is_settled_without_asking():
+    both = {"uid": "c1", "summary": "Same"}
+    assert only_auto_differs(Task(**both, davpunk_order=1), Task(**both, davpunk_order=2))
+    assert not only_auto_differs(Task(**both), Task(uid="c1", summary="Other"))
+
+
+def test_an_ordering_only_collision_takes_the_newer_position(conn, conflicted):
+    task_id, _ = conflicted(
+        local=ics(summary="Same", davpunk_order=1000, last_modified=1000),
+        remote=ics(summary="Same", davpunk_order=5000, last_modified=2000),
+    )
+    assert resolver.auto_resolve(task_id, conn)
+
+    assert cache.open_conflicts(conn) == []
+    row = cache.get_task_row(task_id, conn)
+    assert (row["davpunk_order"], row["sync_state"]) == (5000, SyncState.CLEAN.value)
+    # The server already holds that version, so no PUT is queued.
+    assert conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0] == 0
+
+
+def test_a_newer_local_position_is_re_pushed_against_the_server_etag(conn, conflicted):
+    task_id, _ = conflicted(
+        local=ics(summary="Same", davpunk_order=1000, last_modified=2000),
+        remote=ics(summary="Same", davpunk_order=5000, last_modified=1000),
+    )
+    assert resolver.auto_resolve(task_id, conn)
+
+    row = cache.get_task_row(task_id, conn)
+    assert (row["davpunk_order"], row["sync_state"]) == (1000, SyncState.DIRTY.value)
+    pending = conn.execute("SELECT * FROM pending_changes WHERE task_id = ?", (task_id,)).fetchone()
+    assert (pending["change_type"], pending["base_etag"]) == ("update", 'W/"server"')
+
+
+def test_two_clients_that_agree_are_settled_without_a_window(conn, conflicted):
+    """A pure ETag race: nothing differs at all, so nothing is asked."""
+    task_id, _ = conflicted(local=ics(summary="Same"), remote=ics(summary="Same"))
+    assert resolver.auto_resolve(task_id, conn)
+    assert cache.open_conflicts(conn) == []
+
+
+def test_a_field_the_user_would_be_asked_about_blocks_the_auto_merge(conn, conflicted):
+    task_id, _ = conflicted(
+        local=ics(summary="Mine", davpunk_order=1000),
+        remote=ics(summary="Theirs", davpunk_order=5000),
+    )
+    assert not resolver.auto_resolve(task_id, conn)
+    assert len(cache.open_conflicts(conn)) == 1
+
+
+def test_a_reparent_is_an_intent_not_bookkeeping(conn, conflicted):
+    """``parent_uid`` is deliberately outside AUTO_FIELDS: moving a subtask
+    somewhere else is something the user meant."""
+    task_id, _ = conflicted(
+        local=ics(summary="Same", parent_uid="p1"),
+        remote=ics(summary="Same", parent_uid="p2"),
+    )
+    assert not resolver.auto_resolve(task_id, conn)
+
+
+def test_a_deletion_is_always_a_question(conn, conflicted):
+    """Modes A′ and B have nothing to merge — only a decision to take."""
+    task_id, _ = conflicted(local=None)
+    assert not resolver.auto_resolve(task_id, conn)
+    assert len(cache.open_conflicts(conn)) == 1
+
+
+def test_auto_resolve_is_a_no_op_without_an_open_conflict(conn, synced_task):
+    assert not resolver.auto_resolve(synced_task("c1"), conn)
 
 
 # -------------------------------------------------------------- resolution_for

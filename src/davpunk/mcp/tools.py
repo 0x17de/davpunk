@@ -523,6 +523,7 @@ def sync_now(
                 "pulled": result.pulled,
                 "pushed": result.pushed,
                 "conflicts": result.conflicts,
+                "auto_merged": result.auto_merged,
             }
         )
     ctx.audit("sync_now", None, remote_id or "all")

@@ -1,4 +1,4 @@
-"""Conflict resolution — always user-driven, never automatic.
+"""Conflict resolution.  User-driven wherever there is a question to ask.
 
 Three dialog modes, distinguished by which side of the conflict row is NULL:
 
@@ -17,6 +17,11 @@ resolution that expresses it.
 
 Fields travel in **groups** because some of them are only meaningful together:
 ``DUE`` without its ``TZID`` is a different instant, so the two move as one.
+
+A few fields are not the user's to decide at all.  :data:`AUTO_FIELDS` is
+positional bookkeeping written by drag and drop, never typed, so the newer side
+simply wins — and when two versions differ in *nothing else*,
+:func:`auto_resolve` settles the whole conflict without a window.
 """
 
 from __future__ import annotations
@@ -105,7 +110,11 @@ class FieldGroup:
 DIFF_GROUPS: tuple[FieldGroup, ...] = (
     FieldGroup("summary", "Summary", ("summary",), FieldKind.TEXT),
     FieldGroup("description", "Description", ("description",), FieldKind.MULTILINE),
-    FieldGroup("status", "Status", ("status",), FieldKind.STATUS),
+    # kanban_col rides with the status: a card drag writes both, and the board
+    # lets the override outrank the STATUS it was set beside — so a status from
+    # one side with an override from the other puts the card in a column that
+    # contradicts it.
+    FieldGroup("status", "Status", ("status", "kanban_col"), FieldKind.STATUS),
     FieldGroup("priority", "Priority", ("priority",), FieldKind.PRIORITY),
     FieldGroup("percent_complete", "% complete", ("percent_complete",), FieldKind.PERCENT),
     FieldGroup("due", "Due", ("due_value", "due_tzid"), FieldKind.DATETIME),
@@ -130,8 +139,23 @@ MERGED_FIELDS: tuple[str, ...] = (
     "completed",
     "parent_uid",
     "davpunk_order",
-    "kanban_col",
 )
+
+#: Fields the merge window never shows, because there is nothing to ask.
+#:
+#: ``X-DAVPUNK-ORDER`` is a position in a list, written by dragging and never
+#: typed, so a wrong choice costs a re-drag rather than lost text.  The newer
+#: side takes it, on the same whole-resource judgement :func:`newer_side` makes
+#: for the centre column — iCalendar timestamps the resource, not the property,
+#: so there is no finer "latest" available for it either.
+#:
+#: ``parent_uid`` is deliberately *not* here.  Reparenting a subtask is
+#: something the user meant, not bookkeeping, and it rides with the base task.
+AUTO_FIELDS: tuple[str, ...] = ("davpunk_order",)
+
+#: What :func:`only_auto_differs` compares: everything a resolution writes,
+#: minus the fields that settle themselves.
+DECIDED_FIELDS: tuple[str, ...] = tuple(f for f in MERGED_FIELDS if f not in AUTO_FIELDS)
 
 #: Groups taken wholesale from one side or the other, never sub-field merged.
 #: ``description`` is atomic to preserve inline-checklist integrity.
@@ -277,8 +301,8 @@ def _group_values(task: Task | None, group: FieldGroup) -> dict[str, Any]:
     return {name: copy.deepcopy(getattr(task, name)) for name in group.fields}
 
 
-def newer_side(view: ConflictView) -> Side:
-    """Which side the centre column starts from — the "latest" of the two.
+def newer_of(local: Task | None, remote: Task | None) -> Side:
+    """The "latest" of two versions, whole-resource.
 
     iCalendar carries no per-property timestamps, so *latest* is necessarily a
     judgement about the whole resource rather than about one field:
@@ -286,12 +310,12 @@ def newer_side(view: ConflictView) -> Side:
     because it is the edit the user can still remember making, and because it
     is the one that would otherwise be lost without a trace.
     """
-    if view.remote is None:
+    if remote is None:
         return Side.LOCAL
-    if view.local is None:
+    if local is None:
         return Side.REMOTE
 
-    local_modified, remote_modified = view.local.last_modified, view.remote.last_modified
+    local_modified, remote_modified = local.last_modified, remote.last_modified
     if local_modified is not None and remote_modified is not None:
         if remote_modified > local_modified:
             return Side.REMOTE
@@ -300,9 +324,27 @@ def newer_side(view: ConflictView) -> Side:
     elif remote_modified is not None and local_modified is None:
         return Side.REMOTE
 
-    if view.remote.sequence > view.local.sequence:
+    if remote.sequence > local.sequence:
         return Side.REMOTE
     return Side.LOCAL
+
+
+def newer_side(view: ConflictView) -> Side:
+    """Which side the centre column starts from."""
+    return newer_of(view.local, view.remote)
+
+
+def only_auto_differs(local: Task | None, remote: Task | None) -> bool:
+    """Do these two versions differ in nothing but :data:`AUTO_FIELDS`?
+
+    Nothing is asserted about the auto fields themselves — equal is fine, and
+    is how a *spurious* conflict (two clients that agree, racing on ETags)
+    reads.  What matters is that no field the user would be asked about moved,
+    because then there is no question to put in front of them.
+    """
+    if local is None or remote is None:
+        return False  # one side is a deletion: modes A′ and B, always a question
+    return all(getattr(local, name) == getattr(remote, name) for name in DECIDED_FIELDS)
 
 
 class MergeState:
@@ -379,6 +421,13 @@ class MergeState:
         for group in DIFF_GROUPS:
             for name, value in self.values(group.name).items():
                 setattr(merged, name, value)
+
+        # The base is local whenever local exists, so without this the auto
+        # fields would silently keep the local value however the rest went —
+        # and "take all server" could not come out as a restore_server.
+        auto_source = self.view.task_for(self.default_side) or base
+        for name in AUTO_FIELDS:
+            setattr(merged, name, getattr(auto_source, name))
         return merged.canonicalized()
 
 
@@ -456,6 +505,44 @@ def resolve_conflict(
             return  # the conflict row went with the task
 
         conn.execute("UPDATE conflict_queue SET resolved = 1 WHERE id = ?", (conflict_id,))
+
+
+def auto_resolve(task_id: str, conn: sqlite3.Connection) -> bool:
+    """Settle a conflict that has no question in it.  Sync role only.
+
+    A reorder is a full PUT, and a rebalance is one per renumbered sibling, so
+    two clients tidying the same list collide on a field the merge window does
+    not even show.  Opening a three-pane window with every row dimmed is not a
+    question, it is a puzzle — so when nothing but :data:`AUTO_FIELDS` moved,
+    the newer side wins and the conflict is resolved where it was detected.
+
+    The row is still written and still resolved through the ordinary paths:
+    ``restore_server`` when the server's version is the newer one (no PUT at
+    all), a ``merge`` re-based on ``remote_etag`` when ours is.  That leaves the
+    same audit trail in ``conflict_queue`` as a hand-merged one.
+
+    Returns whether it resolved anything.  **Must not be called inside a
+    :func:`~davpunk.core.cache.tx`** — it opens its own.
+    """
+    row = conn.execute(
+        "SELECT id FROM conflict_queue WHERE task_id = ? AND resolved = 0", (task_id,)
+    ).fetchone()
+    if row is None:
+        return False
+
+    view = load_conflict(row["id"], conn)
+    if view.mode is not Mode.BOTH_CHANGED or not only_auto_differs(view.local, view.remote):
+        return False
+
+    resolution, merged = resolution_for(MergeState(view))
+    resolve_conflict(view.conflict_id, resolution, merged, conn)
+    log.info(
+        "Auto-merged %s: only ordering differed, %s version is newer (%s)",
+        task_id,
+        newer_side(view).value,
+        resolution.value,
+    )
+    return True
 
 
 def _delete_anyway(task_id: str, conn: sqlite3.Connection) -> None:

@@ -403,6 +403,83 @@ def test_in_a_full_cycle_the_pull_detects_the_divergence_first(conn, server, syn
     assert conn.execute("SELECT COUNT(*) FROM conflict_queue WHERE resolved = 0").fetchone()[0] == 1
 
 
+def _diverge(server, uid="a", **kwargs) -> None:
+    """Move the server's copy on, so the next cycle sees a divergence."""
+    resource = server.collections[CAL_HREF].resources[f"{CAL_HREF}{uid}.ics"]
+    resource.ics = server_ics(uid, **kwargs)
+    resource.etag = '"moved-on"'
+    server.collections[CAL_HREF].touch()
+
+
+#: Comfortably after ``cache.now()``, so the server's copy is the newer one.
+LATER = 2**31
+
+
+def test_an_ordering_only_collision_is_merged_without_asking(conn, server, synced):
+    """A drag is a full PUT and a rebalance is one per renumbered sibling, so
+    two clients tidying the same list collide on a field the merge window does
+    not even show.  Latest wins, and nobody is asked."""
+    server.put_resource(CAL_HREF, f"{CAL_HREF}a.ics", server_ics("a", "Same", davpunk_order=1000))
+    synced()
+    cache.update_task_optimistic(local_task(conn, "a")["id"], {"davpunk_order": 2000}, conn)
+    _diverge(server, summary="Same", davpunk_order=9000, last_modified=LATER)
+
+    pull, push = synced()
+
+    # The server's position is the newer one, so nothing is sent back.
+    assert (pull.conflicts, pull.auto_merged, push.pushed) == (0, 1, 0)
+    assert conn.execute("SELECT COUNT(*) FROM conflict_queue WHERE resolved = 0").fetchone()[0] == 0
+    # Settled, not sidestepped: the row is written and resolved like any other.
+    assert conn.execute("SELECT COUNT(*) FROM conflict_queue WHERE resolved = 1").fetchone()[0] == 1
+    row = local_task(conn, "a")
+    assert (row["davpunk_order"], row["sync_state"]) == (9000, SyncState.CLEAN.value)
+
+
+def test_a_newer_local_position_is_pushed_rather_than_asked_about(conn, server, synced):
+    """The other direction: our drag is the newer one, so it goes out — re-based
+    on the ETag the server moved to, so the If-Match succeeds this time."""
+    server.put_resource(CAL_HREF, f"{CAL_HREF}a.ics", server_ics("a", "Same", davpunk_order=1000))
+    synced()
+    cache.update_task_optimistic(local_task(conn, "a")["id"], {"davpunk_order": 2000}, conn)
+    _diverge(server, summary="Same", davpunk_order=9000, last_modified=1000)
+
+    pull, push = synced()
+
+    assert (pull.conflicts, pull.auto_merged, push.pushed) == (0, 1, 1)
+    assert local_task(conn, "a")["sync_state"] == SyncState.CLEAN.value
+    assert "X-DAVPUNK-ORDER:2000" in server.collections[CAL_HREF].resources[f"{CAL_HREF}a.ics"].ics
+
+
+def test_an_ordering_change_beside_a_real_edit_is_still_a_question(conn, server, synced):
+    server.put_resource(CAL_HREF, f"{CAL_HREF}a.ics", server_ics("a", "Same", davpunk_order=1000))
+    synced()
+    cache.update_task_optimistic(
+        local_task(conn, "a")["id"], {"summary": "Mine", "davpunk_order": 2000}, conn
+    )
+    _diverge(server, summary="Server v2", davpunk_order=9000, last_modified=LATER)
+
+    pull, _ = synced()
+
+    assert (pull.conflicts, pull.auto_merged) == (1, 0)
+    assert local_task(conn, "a")["sync_state"] == SyncState.CONFLICT.value
+
+
+def test_a_412_on_an_ordering_only_change_is_auto_merged(conn, server, synced):
+    """The push-side detection site, driven directly — in a full cycle the pull
+    reaches the divergence first."""
+    server.put_resource(CAL_HREF, f"{CAL_HREF}a.ics", server_ics("a", "Same", davpunk_order=1000))
+    synced()
+    cache.update_task_optimistic(local_task(conn, "a")["id"], {"davpunk_order": 2000}, conn)
+    _diverge(server, summary="Same", davpunk_order=9000, last_modified=LATER)
+
+    push = sync_engine.push_phase(cal_row(conn), FakeClient(server), conn)
+
+    assert (push.conflicts, push.auto_merged) == (0, 1)
+    assert local_task(conn, "a")["sync_state"] == SyncState.CLEAN.value
+    # Unlike a conflict the user has to settle, there is no intent left to keep.
+    assert conn.execute("SELECT COUNT(*) FROM pending_changes").fetchone()[0] == 0
+
+
 def test_a_404_on_update_is_a_mode_b_conflict(conn, server, synced):
     """The server deleted it under us; remote_raw_ics IS NULL."""
     server.put_resource(CAL_HREF, f"{CAL_HREF}a.ics", server_ics("a"))

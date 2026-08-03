@@ -48,7 +48,7 @@ def render(group: FieldGroup, values: dict[str, Any]) -> str:
     if group.kind is FieldKind.MULTILINE:
         return _render_multiline(value)
     if group.kind is FieldKind.STATUS:
-        return str(value) if value else NO_STATUS
+        return _render_status(group, values)
     if group.kind is FieldKind.PRIORITY:
         return str(value) if value else NO_PRIORITY
     if group.kind is FieldKind.PERCENT:
@@ -84,6 +84,19 @@ def _render_multiline(value: Any) -> str:
     lines = str(value).splitlines()
     head = lines[0] if lines else ""
     return f"{head} … ({len(lines)} lines)" if len(lines) > 1 else head
+
+
+def _render_status(group: FieldGroup, values: dict[str, Any]) -> str:
+    """The status and the board column it was set beside.
+
+    The override is shown, not hidden, because two sides that disagree about it
+    alone would otherwise render identically in a row marked as differing —
+    which is the one thing a diff must never do.
+    """
+    status = values.get(group.fields[0])
+    text = str(status) if status else NO_STATUS
+    column = values.get(group.fields[1]) if len(group.fields) > 1 else None
+    return f"{text} · {column}" if column else text
 
 
 def _render_datetime(group: FieldGroup, values: dict[str, Any]) -> str:
@@ -192,7 +205,17 @@ class _MultilineEditor(FieldEditor):
 
 
 class _StatusEditor(FieldEditor):
+    """STATUS, carrying the kanban-column override that was set beside it.
+
+    The combo edits the status; the override is not typeable and has no widget
+    of its own, so it rides along with whichever side the row came from.  It
+    cannot be decided separately: the board lets an override outrank the status,
+    so a status from one column with an override from the other lands the card
+    somewhere its own status contradicts.
+    """
+
     def _build(self) -> QWidget:
+        self._kanban_col: str | None = None
         combo = QComboBox()
         combo.addItems(STATUSES)
         combo.activated.connect(self._changed)  # activated: user only, not code
@@ -200,10 +223,14 @@ class _StatusEditor(FieldEditor):
 
     def values(self) -> dict[str, Any]:
         text = self.widget.currentText()
-        return {self.group.primary: None if text == NO_STATUS else Status(text)}
+        return {
+            self.group.fields[0]: None if text == NO_STATUS else Status(text),
+            self.group.fields[1]: self._kanban_col,
+        }
 
     def set_values(self, values: dict[str, Any]) -> None:
-        status = values.get(self.group.primary)
+        status = values.get(self.group.fields[0])
+        self._kanban_col = values.get(self.group.fields[1])
         self._quiet(lambda: self.widget.setCurrentText(str(status) if status else NO_STATUS))
 
 
