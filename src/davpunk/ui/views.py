@@ -12,8 +12,8 @@ import logging
 import time
 from collections.abc import Callable
 
-from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QBrush, QPalette
+from PySide6.QtCore import QRect, QSize, Qt, QTimer, Signal
+from PySide6.QtGui import QBrush, QFont, QFontMetrics, QPainter, QPalette
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -21,6 +21,9 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QSizePolicy,
+    QStyle,
+    QStyleOption,
     QTreeWidget,
     QTreeWidgetItem,
     QVBoxLayout,
@@ -657,6 +660,11 @@ _HEADER_STYLES = {
 }
 
 
+#: Border plus padding, from :data:`_HEADER_STYLES`.  A rotated label paints
+#: its own text, so it also has to keep its own hands off the frame.
+_HEADER_INSET = 4
+
+
 class _ColumnHeader(QLabel):
     """The column's name, its drop target, and its fold handle.
 
@@ -672,6 +680,11 @@ class _ColumnHeader(QLabel):
     Clicking it folds the column — see :meth:`KanbanView.toggle_column`.  The
     name is the one part of a folded column still on screen, so it is also the
     only thing left to click to get it back.
+
+    Folded, it turns on its side: the text runs top to bottom and the widget is
+    one line *tall* and one line *wide*, which is what makes a folded column a
+    spine rather than a stub.  Horizontally it would still cost the width of
+    the word "Cancelled" — five columns of that is the board back again.
     """
 
     #: ``(dragged tasks,)`` — the column is implied by which header it is.
@@ -680,9 +693,82 @@ class _ColumnHeader(QLabel):
 
     def __init__(self, text: str, parent=None) -> None:
         super().__init__(text, parent)
+        self.vertical = False
         self.setAcceptDrops(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.set_drop_state("rest")
+
+    def set_vertical(self, vertical: bool) -> None:
+        """Sideways, and as tall as the board lets it be.
+
+        The height is what makes the bar aimable: rotated text is a few
+        characters wide, and a drop target that thin is one you fight with.
+        Full height, the whole right edge of the board is Done.
+        """
+        if vertical == self.vertical:
+            return
+        self.vertical = vertical
+        self.setSizePolicy(
+            QSizePolicy.Policy.Fixed if vertical else QSizePolicy.Policy.Preferred,
+            QSizePolicy.Policy.Expanding if vertical else QSizePolicy.Policy.Preferred,
+        )
+        self.updateGeometry()
+        self.update()
+
+    def sizeHint(self) -> QSize:
+        if not self.vertical:
+            return super().sizeHint()
+        return QSize(self._line_height(), self._text_length())
+
+    def minimumSizeHint(self) -> QSize:
+        if not self.vertical:
+            return super().minimumSizeHint()
+        # Shorter than the name, so a small window shrinks the bar and elides
+        # rather than forcing the board wider than the screen.
+        return QSize(self._line_height(), min(self._text_length(), 6 * self._line_height()))
+
+    def _bold_font(self) -> QFont:
+        """What :meth:`paintEvent` draws with, so the measuring and the drawing
+        cannot disagree — the open header is bold too, and measuring the plain
+        face asks the layout for a bar the name does not fit in."""
+        font = self.font()
+        font.setBold(True)
+        return font
+
+    def _line_height(self) -> int:
+        return QFontMetrics(self._bold_font()).height() + 2 * _HEADER_INSET
+
+    def _text_length(self) -> int:
+        metrics = QFontMetrics(self._bold_font())
+        return metrics.horizontalAdvance(self.text()) + 2 * _HEADER_INSET
+
+    def paintEvent(self, event) -> None:
+        if not self.vertical:
+            super().paintEvent(event)
+            return
+        painter = QPainter(self)
+        option = QStyleOption()
+        option.initFrom(self)
+        # The stylesheet is drawn by the QLabel paintEvent this one replaces —
+        # without repeating it by hand, the armed and hovered borders would go
+        # missing exactly when the bar is the thing being dropped on.
+        self.style().drawPrimitive(QStyle.PrimitiveElement.PE_Widget, option, painter, self)
+        painter.setPen(option.palette.color(self.foregroundRole()))
+        font = self._bold_font()
+        painter.setFont(font)
+        metrics = QFontMetrics(font)
+        # Clockwise about the top-right corner, so the text reads downwards and
+        # the box it is drawn in is this one transposed.
+        painter.translate(self.width(), 0)
+        painter.rotate(90)
+        box = QRect(
+            _HEADER_INSET,
+            _HEADER_INSET,
+            self.height() - 2 * _HEADER_INSET,
+            self.width() - 2 * _HEADER_INSET,
+        )
+        text = metrics.elidedText(self.text(), Qt.TextElideMode.ElideRight, box.width())
+        painter.drawText(box, Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter, text)
 
     def mousePressEvent(self, event) -> None:
         # A QLabel ignores presses, and Qt then delivers the release to
@@ -804,16 +890,11 @@ class KanbanView(QWidget):
                 )
             )
             box.addWidget(widget, 1)
-            # Takes the height the cards leave behind when the column is
-            # folded, so its name stays level with every other one instead of
-            # drifting into the middle of an empty strip.
-            box.addStretch(0)
             self.lists[column.id] = widget
             self._boxes[column.id] = box
             layout.addLayout(box)
 
-        for column in self.columns:
-            self._apply_fold(column.id)
+        self._apply_folds()
         self._paint_headers()
 
     # ---------------------------------------------------------- folded columns
@@ -839,27 +920,51 @@ class KanbanView(QWidget):
         self.folded_columns.discard(column_id)
         if folded:
             self.folded_columns.add(column_id)
-        self._apply_fold(column_id)
+        self._apply_folds()
         self._paint_headers()
 
-    def _apply_fold(self, column_id: str) -> None:
-        folded = column_id in self.folded_columns
-        self.lists[column_id].setHidden(folded)
-        box = self._boxes[column_id]
-        # The trailing spacer only earns its keep once the cards are gone.
-        box.setStretch(box.count() - 1, 1 if folded else 0)
-        # Without this the folded column keeps its equal share of the width and
-        # nothing is won.  One box per column, added in order, so a column's
-        # place in the board is its place in `_boxes`.
-        self._board.setStretch(list(self._boxes).index(column_id), 0 if folded else 1)
+    def _apply_folds(self) -> None:
+        """Hide the cards, turn the names on their side, and gather the folded
+        columns at the right edge.
+
+        They gather there rather than staying put because a spine standing
+        between two open columns is a seam down the middle of the board, and
+        because what gets folded is the finished work — which is where the eye
+        looks for it anyway.  Their order among themselves is the configured
+        one, so unfolding a column puts it back where it came from.
+        """
+        for column in sorted(self.columns, key=lambda c: c.id in self.folded_columns):
+            folded = column.id in self.folded_columns
+            self.lists[column.id].setHidden(folded)
+            self.headers[column.id].set_vertical(folded)
+            box = self._boxes[column.id]
+            # Every box taken out and put back at the end, in the order wanted,
+            # which walks the whole board into that order.  The stretch is the
+            # other half of the fold: without it the spine keeps its equal
+            # share of the width and folding wins nothing.
+            self._board.removeItem(box)
+            self._board.addLayout(box, 0 if folded else 1)
+
+    def column_order(self) -> list[str]:
+        """The columns as the board has them, left to right — which is the
+        configured order only until something is folded."""
+        placed: list[str] = []
+        for index in range(self._board.count()):
+            item = self._board.itemAt(index)
+            placed += [column_id for column_id, box in self._boxes.items() if box is item]
+        return placed
 
     def _paint_headers(self) -> None:
         """The name, the marker and the count, for folded and open alike."""
         for column in self.columns:
             folded = column.id in self.folded_columns
-            marker = "▸" if folded else "▾"
             header = self.headers[column.id]
-            header.setText(f"{marker} <b>{column.label}</b>  ({self._counts.get(column.id, 0)})")
+            count = self._counts.get(column.id, 0)
+            # Folded, the text is painted by hand and rotated with it, so it is
+            # plain rather than markup — and the "▾" turns into an arrow
+            # pointing left, back at the board the column unfolds into.
+            name = column.label if folded else f"<b>{column.label}</b>"
+            header.setText(f"▾ {name}  ({count})")
             header.setToolTip(
                 f"Click to {'unfold' if folded else 'fold'} this column.\n"
                 "Cards can still be dropped on the name either way."

@@ -427,9 +427,12 @@ what puts a task back in the "To Do" pool.
 
 Deleting a column is the heavy version of "I do not want to look at this", and
 it takes the drop target with it — there is then nowhere to *put* a finished
-card. Clicking a column's name folds it instead: it collapses to a strip of its
-own name and count, gives its width to the columns you are working in, and goes
-on accepting drops. Click it again to bring it back.
+card. Clicking a column's name folds it instead: it collapses to a spine at the
+right edge of the board, one line wide, with its name and count turned on their
+side. It gives the rest of its width to the columns you are working in and goes
+on accepting drops — the whole height of the spine is the target, so `Done` is
+easier to hit folded than open. Click it again to bring it back, in the place
+the config gives it.
 
 Start it that way with `folded`:
 

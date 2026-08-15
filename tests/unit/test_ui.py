@@ -1585,6 +1585,51 @@ def test_a_folded_column_is_still_a_drop_target(window, make_task):
     assert kanban.lists["done"].isHidden()  # and it stays out of the way
 
 
+def test_a_folded_column_is_a_spine_one_line_wide(window):
+    """Horizontally the name still costs the width of the word "Cancelled",
+    and five of those is the board back again."""
+    kanban = _kanban(window)
+    kanban.set_column_folded("cancelled", False)
+    header = kanban.headers["cancelled"]
+    open_width = header.sizeHint().width()
+
+    kanban.set_column_folded("cancelled", True)
+
+    assert header.vertical
+    # One line of text on its side: taller than it is wide, and a fraction of
+    # the width the same name laid flat asks for.
+    assert header.sizeHint().width() * 3 < open_width
+    assert header.sizeHint().height() > header.sizeHint().width()
+    # The other half of the fold — a spine with a share of the width would win
+    # nothing at all.
+    assert kanban._board.stretch(kanban.column_order().index("cancelled")) == 0
+
+
+def test_a_folded_column_moves_to_the_right_edge_and_back(window):
+    """A spine standing between two open columns is a seam down the middle."""
+    kanban = _kanban(window)
+    for column in kanban.columns:
+        kanban.set_column_folded(column.id, False)
+    configured = [column.id for column in kanban.columns]
+    assert kanban.column_order() == configured
+
+    kanban.set_column_folded("needsaction", True)
+    assert kanban.column_order()[-1] == "needsaction"
+
+    kanban.set_column_folded("needsaction", False)
+    assert kanban.column_order() == configured
+
+
+def test_the_folded_columns_keep_their_configured_order_among_themselves(window):
+    """So unfolding one puts it back where it came from."""
+    kanban = _kanban(window)
+    assert kanban.folded_columns == {"done", "cancelled"}  # completed is hidden
+
+    kanban.set_column_folded("needsaction", True)
+
+    assert kanban.column_order() == ["todo", "inprogress", "needsaction", "done", "cancelled"]
+
+
 def test_a_column_can_start_folded_from_the_config(qapp, conn, calendar_id, db_path):
     from davpunk.config import KanbanColumn, KanbanConfig
     from davpunk.ui.main_window import MainWindow

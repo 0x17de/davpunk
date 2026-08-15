@@ -1558,8 +1558,9 @@ verify_tls     = true
 # A status with no column here is not shown on the board — that is how you drop
 # Done and Cancelled without losing the states, which stay reachable through
 # Edit → Change status.
-# folded starts a column collapsed to a strip of its name and count, still a
-# drop target.  A startup default: clicking a column name folds and unfolds it,
+# folded starts a column collapsed to a spine at the right edge — its name and
+# count turned on their side, one line wide, still a drop target for its whole
+# height.  A startup default: clicking a column name folds and unfolds it,
 # and that is not written back.  The COMPLETED and CANCELLED columns start
 # folded regardless when show_completed is false — nothing they could hold is
 # on the board.
