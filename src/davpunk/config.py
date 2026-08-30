@@ -369,7 +369,7 @@ class DavPunkConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     theme: str = "dark"
-    default_view: str = "list"
+    default_view: str = "kanban"
     show_completed: bool = False  # startup default; runtime toggle is not persisted
     max_resource_bytes: int = 262_144  # oversize quarantine threshold
     unified_view: bool = True

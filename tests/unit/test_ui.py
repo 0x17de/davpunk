@@ -69,6 +69,10 @@ def window(qapp, conn, ui_config, calendar_id, other_calendar_id, db_path):
 
     cache.reconcile_remotes(ui_config.remotes, conn)
     win = MainWindow(ui_config, conn, db_path)
+    # The app opens on the board, and refresh() only reaches the view on
+    # screen, so tests that drive the tree need the list put there first.
+    # Board tests switch back with switch_view(1).
+    win.switch_view(0)
     yield win
     win.sync.stop()
     win._poll.stop()
@@ -86,15 +90,31 @@ def test_the_window_builds_with_all_three_views(window):
     ]
 
 
-def test_the_default_view_comes_from_config(qapp, conn, calendar_id, db_path):
+@pytest.mark.parametrize(
+    ("view", "index", "label"),
+    [("kanban", 1, "Kanban"), ("list", 0, "List")],
+)
+def test_the_default_view_comes_from_config(qapp, conn, calendar_id, db_path, view, index, label):
     from davpunk.ui.main_window import MainWindow
 
-    config = DavPunkConfig(default_view="kanban")
+    config = DavPunkConfig(default_view=view)
     win = MainWindow(config, conn, db_path)
     try:
-        assert win.stack.currentIndex() == 1
+        assert win.stack.currentIndex() == index
         # The selector has to agree with the stack, or the first switch back is
         # a no-op: the combo already reads "List" while Kanban is on screen.
+        assert win.view_selector.currentText() == label
+    finally:
+        win.sync.stop()
+
+
+def test_kanban_is_the_view_you_get_without_saying_so(qapp, conn, calendar_id, db_path):
+    """The board is what the app is for, so an empty [davpunk] table opens it."""
+    from davpunk.ui.main_window import MainWindow
+
+    win = MainWindow(DavPunkConfig(), conn, db_path)
+    try:
+        assert win.stack.currentIndex() == 1
         assert win.view_selector.currentText() == "Kanban"
     finally:
         win.sync.stop()
@@ -3731,7 +3751,7 @@ def test_the_settings_dialog_shows_the_current_general_values(qapp, written_conf
 
     dialog = SettingsDialog(load_config(written_config), written_config)
     assert dialog.theme.currentText() == "dark"
-    assert dialog.default_view.currentText() == "list"
+    assert dialog.default_view.currentText() == "kanban"
 
 
 def test_saving_preserves_comments_and_untouched_sections(qapp, written_config):

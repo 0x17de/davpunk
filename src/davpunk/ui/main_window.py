@@ -117,7 +117,7 @@ class MainWindow(QMainWindow):
         # directly leaves the toolbar combo reading "List" while the Kanban
         # board is on screen, and the first thing you do to the combo then
         # looks like it does nothing.
-        self.switch_view(VIEW_INDEX.get(config.default_view, 0))
+        self.switch_view(VIEW_INDEX.get(config.default_view, VIEW_INDEX["kanban"]))
         self.refresh()
 
     # ------------------------------------------------------------------ chrome
