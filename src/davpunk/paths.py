@@ -66,6 +66,12 @@ def recovery_dir() -> Path:
     return data_dir() / "recovery"
 
 
+def ui_state_file() -> Path:
+    """Machine-written view state — last filter and the like.  Not config: it
+    lives in the state dir precisely because nobody is meant to edit it."""
+    return state_dir() / "ui-state.json"
+
+
 def log_file() -> Path:
     return state_dir() / "davpunk.log"
 

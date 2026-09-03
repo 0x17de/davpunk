@@ -474,8 +474,18 @@ list, so that is no restriction and the button says "all". Tags do not work that
 way: a task may carry none, so ticking every tag still means "has a tag" and
 keeps filtering. Only tags actually in use are offered.
 
-The filter is not saved. It is how you are looking at the board right now, not a
-setting — the same reasoning as *show completed*.
+The picked lists and tags are remembered: close DavPunk with "private" ticked
+and it opens with "private" ticked, along with the `any`/`all` switch. That is
+what a picker is — you work out of the same one or two lists for weeks, and
+re-picking them every morning is a chore. A list that has since gone away drops
+out of the remembered pick rather than filtering the board down to nothing.
+
+The text box is *not* remembered, for the reason *show completed* is not: a
+search is typed for one question and answered, so it starts empty every time.
+
+What is remembered lives in `~/.local/state/davpunk/ui-state.json`, not in your
+config — nothing DavPunk writes for itself belongs in a file you own. Delete it
+and the board opens unfiltered.
 
 The full config reference — kanban columns, key bindings, MCP — is in
 [HLD.md §16](HLD.md).

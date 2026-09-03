@@ -281,6 +281,116 @@ def test_a_change_while_the_menu_is_open_lands_when_it_closes(qapp, window, make
     assert list(button._entries) == ["home", "shop"]
 
 
+# ---------------------------------------------------- a remembered selection
+
+
+def _reopen(window, qapp, conn, ui_config, db_path):
+    """Close the window and open another, as a restart would."""
+    from davpunk.ui.main_window import MainWindow
+
+    window.sync.stop()
+    window._poll.stop()
+    fresh = MainWindow(ui_config, conn, db_path)
+    fresh.switch_view(1)
+    fresh.refresh()
+    qapp.processEvents()  # the restore lands after the refresh that enabled it
+    return fresh
+
+
+def test_the_picked_lists_come_back_after_a_restart(
+    qapp, window, make_task, ui_config, db_path, calendar_id, other_calendar_id
+):
+    """Someone who works out of one calendar works out of it tomorrow too."""
+    cache.create_task_local(make_task("t1", summary="here"), window.conn)
+    cache.create_task_local(
+        make_task("t2", summary="there", calendar_id=other_calendar_id), window.conn
+    )
+    kanban = _kanban(window)
+    _tick(kanban.filter_bar.calendars, {calendar_id})
+    assert _shown(kanban) == 1
+
+    fresh = _reopen(window, qapp, window.conn, ui_config, db_path)
+    try:
+        board = fresh.kanban_view
+        assert board.filter_bar.calendars.selected() == {calendar_id}
+        assert board.filter.calendar_ids == frozenset({calendar_id})
+        assert _shown(board) == 1
+    finally:
+        fresh.sync.stop()
+        fresh._poll.stop()
+
+
+def test_the_picked_tags_and_the_any_all_switch_come_back_too(
+    qapp, window, make_task, ui_config, db_path
+):
+    cache.create_task_local(make_task("t1", categories=["home", "urgent"]), window.conn)
+    cache.create_task_local(make_task("t2", categories=["home"]), window.conn)
+    kanban = _kanban(window)
+    kanban.filter_bar.match_all.setChecked(True)
+    _tick(kanban.filter_bar.tags, {"home", "urgent"})
+    assert _shown(kanban) == 1
+
+    fresh = _reopen(window, qapp, window.conn, ui_config, db_path)
+    try:
+        board = fresh.kanban_view
+        assert board.filter_bar.tags.selected() == {"home", "urgent"}
+        assert board.filter.match_all_tags
+        assert _shown(board) == 1
+    finally:
+        fresh.sync.stop()
+        fresh._poll.stop()
+
+
+def test_the_text_box_is_not_remembered(qapp, window, make_task, ui_config, db_path):
+    """A search is typed for one question and answered; a picker is not."""
+    cache.create_task_local(make_task("t1", summary="milk"), window.conn)
+    cache.create_task_local(make_task("t2", summary="report"), window.conn)
+    kanban = _kanban(window)
+    kanban.filter_bar.text.setText("milk")
+    assert _shown(kanban) == 1
+
+    fresh = _reopen(window, qapp, window.conn, ui_config, db_path)
+    try:
+        assert fresh.kanban_view.filter_bar.text.text() == ""
+        assert _shown(fresh.kanban_view) == 2
+    finally:
+        fresh.sync.stop()
+        fresh._poll.stop()
+
+
+def test_a_list_that_went_away_drops_out_of_the_remembered_pick(
+    qapp, window, make_task, ui_config, db_path, calendar_id, other_calendar_id
+):
+    """Restoring a pick naming a calendar that no longer exists must not leave
+    the board filtered down to nothing it can never show again."""
+    from davpunk.ui import ui_state
+    from davpunk.ui.views import FILTER_STATE_KEY
+
+    cache.create_task_local(make_task("t1"), window.conn)
+    ui_state.remember(
+        FILTER_STATE_KEY,
+        {"calendars": ["gone-for-good"], "tags": [], "match_all_tags": False},
+    )
+
+    fresh = _reopen(window, qapp, window.conn, ui_config, db_path)
+    try:
+        board = fresh.kanban_view
+        assert board.filter_bar.calendars.selected() == set()
+        assert _shown(board) == 1
+    finally:
+        fresh.sync.stop()
+        fresh._poll.stop()
+
+
+def test_unreadable_state_is_ignored_rather_than_fatal(davpunk_home):
+    from davpunk import paths
+    from davpunk.ui import ui_state
+
+    paths.ensure_dir(paths.state_dir())
+    paths.ui_state_file().write_text("{not json", encoding="utf-8")
+    assert ui_state.load() == {}
+
+
 # ------------------------------------------------------------- hierarchies
 
 

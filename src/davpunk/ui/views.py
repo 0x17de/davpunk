@@ -33,10 +33,14 @@ from PySide6.QtWidgets import (
 from davpunk.config import KanbanColumn
 from davpunk.core import cache
 from davpunk.models.task import Status, Task
+from davpunk.ui import ui_state
 from davpunk.ui import viewmodel as vm
 from davpunk.ui.filter_bar import FilterBar
 
 log = logging.getLogger("davpunk.ui.views")
+
+#: Where the board's filter is remembered between runs.
+FILTER_STATE_KEY = "kanban_filter"
 
 #: The window's cross-list move prompt, as the views see it: the tasks that
 #: came from another list and the list they were dropped in, in; the tasks it
@@ -843,6 +847,9 @@ class KanbanView(QWidget):
         outer = QVBoxLayout(self)
         self.filter_bar = FilterBar()
         self.filter_bar.filterChanged.connect(self._on_filter_changed)
+        # Whichever lists were picked last time, ticked again as soon as the
+        # first refresh has something to tick.
+        self.filter_bar.restore(ui_state.get(FILTER_STATE_KEY))
         outer.addWidget(self.filter_bar)
 
         board = QWidget()
@@ -1192,6 +1199,10 @@ class KanbanView(QWidget):
 
     def _on_filter_changed(self, task_filter) -> None:
         self.filter = task_filter
+        # Written here rather than on close, so a crash or a kill costs the
+        # picked lists nothing.  Most changes through here keep nothing new —
+        # every keystroke in the text box — and those cost no write.
+        ui_state.remember(FILTER_STATE_KEY, self.filter_bar.state())
         self.refresh()
 
     def _activated(self, item: QTreeWidgetItem, _column: int = 0) -> None:

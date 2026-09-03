@@ -5,8 +5,13 @@ the selection has to be multiple-choice on both axes — you rarely want exactly
 one list, and "shopping *and* urgent" is a different question from "shopping
 *or* urgent".
 
-Selection is runtime state, not a stored preference, for the same reason
-``show_completed`` is: it is a way of looking at the board right now.
+The picked lists and tags are remembered across restarts, the free text is
+not. called the whole selection runtime state, "a way of looking at the
+board right now", and for the text box that is exactly right — a search is
+typed for one question and answered.  The pickers are not searches: someone
+who works out of "private" works out of it for weeks, and re-picking it at
+every launch is a chore, not a fresh start.  What is kept goes to
+:mod:`davpunk.ui.ui_state`, never to ``config.toml``.
 """
 
 from __future__ import annotations
@@ -71,6 +76,10 @@ class _CheckMenuButton(QToolButton):
     """
 
     changed = Signal()
+    #: A remembered selection has just been applied — separate from ``changed``
+    #: because it lands *during* a refresh, and the refresh it asks for has to
+    #: wait until that one is over.
+    restored = Signal()
 
     def __init__(self, label: str, all_means_none: bool = True, parent=None) -> None:
         super().__init__(parent)
@@ -87,6 +96,8 @@ class _CheckMenuButton(QToolButton):
         self.setText(label)
         self._entries: dict[str, str] = {}
         self._pending: dict[str, str] | None = None
+        #: A selection read back from disk, waiting for the entries it names.
+        self._wanted: set[str] | None = None
 
     def set_entries(self, entries: dict[str, str], selected: set[str]) -> None:
         """``{value: label}``, preserving whatever is still selectable.
@@ -98,7 +109,16 @@ class _CheckMenuButton(QToolButton):
         ticks, a genuine change arriving meanwhile is held and applied on close
         rather than waiting for whatever refresh happens to come next.
         """
-        if entries == self._entries:
+        if self._wanted is not None and entries and not self._menu.isVisible():
+            # The moment the entries a remembered pick names exist, apply it.
+            # Values that have gone away — a calendar since removed — go with
+            # them, and the rebuild happens even when the entries themselves
+            # are unchanged, because here it is the boxes that have to move.
+            selected = self._wanted & set(entries)
+            self._wanted = None
+            self._entries = {}
+            QTimer.singleShot(0, self.restored.emit)
+        elif entries == self._entries:
             self._pending = None
             return
         if self._menu.isVisible():
@@ -163,6 +183,10 @@ class _CheckMenuButton(QToolButton):
         self._on_toggled()
 
     def _on_toggled(self, _checked: bool = False) -> None:
+        # A pick made here outranks a remembered one still waiting for entries
+        # that have never turned up — otherwise a tag first used an hour into
+        # the session would drag last week's filter back over this one.
+        self._wanted = None
         self._update_text(self.selected())
         self.changed.emit()
 
@@ -177,6 +201,17 @@ class _CheckMenuButton(QToolButton):
             self.setText(f"{self._label}: {self._entries.get(only, only)}")
         else:
             self.setText(f"{self._label}: {len(selected)} of {total}")
+
+    def restore(self, values: set[str]) -> None:
+        """Tick these as soon as there is something to tick.
+
+        At startup the picker is empty — the calendars arrive with the first
+        refresh, once the database has been read — so a pick read back from
+        disk cannot be applied when it is read.  It is held until it can be.
+        """
+        self._wanted = set(values)
+        if self._entries:
+            self.set_entries(dict(self._entries), self.selected())
 
     def selected(self) -> set[str]:
         chosen = {a.data() for a in self._checkable_actions() if a.isChecked()}
@@ -240,6 +275,16 @@ class FilterBar(QWidget):
         self._calendar_names: dict[str, str] = {}
         self.calendars.changed.connect(self._emit)
         self.tags.changed.connect(self._emit)
+        # A restored pick lands in the middle of the refresh that populated the
+        # picker, and re-entering that refresh from inside itself would leave
+        # the outer one painting a board built from the filter it replaced.  A
+        # zero timer puts the new filter after it; restarting the timer folds
+        # the two buttons' restores into the single refresh they deserve.
+        self._restore_timer = QTimer(self)
+        self._restore_timer.setSingleShot(True)
+        self._restore_timer.timeout.connect(self._emit)
+        self.calendars.restored.connect(lambda: self._restore_timer.start(0))
+        self.tags.restored.connect(lambda: self._restore_timer.start(0))
         self.text.textChanged.connect(self._emit)
         self.match_all.toggled.connect(self._on_match_all)
         self.reset.clicked.connect(self.clear)
@@ -262,6 +307,34 @@ class FilterBar(QWidget):
             match_all_tags=self.match_all.isChecked(),
             text=self.text.text(),
         )
+
+    def state(self) -> dict:
+        """What is worth remembering across a restart: the two pickers and the
+        any/all switch that reads the tag one.  Not the text box."""
+        return {
+            "calendars": sorted(self.calendars.selected()),
+            "tags": sorted(self.tags.selected()),
+            "match_all_tags": self.match_all.isChecked(),
+        }
+
+    def restore(self, state: dict) -> None:
+        """Re-apply a remembered :meth:`state`.
+
+        Whatever it names that no longer exists is simply not there to tick, so
+        a calendar that has since gone away drops out quietly rather than
+        filtering the board down to nothing.
+        """
+        if not state:
+            return
+        # Silently, and without the emit: any/all is only a question once tags
+        # are picked, and picking them is what will carry it into the filter.
+        match_all = bool(state.get("match_all_tags"))
+        self.match_all.blockSignals(True)
+        self.match_all.setChecked(match_all)
+        self.match_all.blockSignals(False)
+        self.match_all.setText("all" if match_all else "any")
+        self.calendars.restore(set(state.get("calendars") or ()))
+        self.tags.restore(set(state.get("tags") or ()))
 
     def clear(self) -> None:
         for button in (self.calendars, self.tags):
