@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from functools import partial
 
 from PySide6.QtCore import QEvent, Qt
 from PySide6.QtGui import QPalette
@@ -171,7 +172,7 @@ class MergeDialog(QDialog):
         self.editors = {}
         self.detail = QStackedWidget()
         for group in DIFF_GROUPS:
-            editor = fields.editor_for(group, lambda name=group.name: self._edited(name))
+            editor = fields.editor_for(group, partial(self._edited, group.name))
             self.editors[group.name] = editor
             self.detail.addWidget(_top_aligned(editor))
 

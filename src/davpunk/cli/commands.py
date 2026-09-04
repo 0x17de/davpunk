@@ -71,6 +71,9 @@ def cmd_sync(args) -> int:
     if dry:
         return _dry_run(remotes, args)
 
+    # Only the dry run leaves the database unopened; everything below writes.
+    assert conn is not None
+
     cancel = threading.Event()
     failed = False
     try:

@@ -6,6 +6,7 @@ import argparse
 import sys
 
 from davpunk import logging_setup, paths, preflight
+from davpunk.logging_setup import Entrypoint
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -54,7 +55,7 @@ def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
 
     # doctor reports the floors individually rather than dying on the first one.
-    entrypoint = "cli" if args.command else "ui"
+    entrypoint: Entrypoint = "cli" if args.command else "ui"
     logging_setup.setup_logging(entrypoint, args.log_level)
     if args.command != "doctor":
         preflight.preflight_or_die()

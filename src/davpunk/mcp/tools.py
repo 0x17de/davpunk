@@ -358,8 +358,7 @@ def create_task(
     task_ref = format_ref(calendar_id, task.uid)
     ctx.audit("create_task", task_ref, summary)
 
-    row = cache.get_task_row(task_id, ctx.conn)
-    return {"task_ref": task_ref, "task": _projection(row)}
+    return {"task_ref": task_ref, "task": _projection_of(task_id, ctx.conn)}
 
 
 def create_tasks(
@@ -420,9 +419,7 @@ def create_tasks(
             ) from exc
         order += ORDER_STEP
         task_ref = format_ref(calendar_id, task.uid)
-        created.append(
-            {"task_ref": task_ref, "task": _projection(cache.get_task_row(task_id, ctx.conn))}
-        )
+        created.append({"task_ref": task_ref, "task": _projection_of(task_id, ctx.conn)})
 
     ctx.audit("create_tasks", parent_ref, f"{len(created)} task(s) in {calendar_id}")
     return {"created": created, "count": len(created)}
@@ -467,7 +464,14 @@ def _update(ctx: ToolContext, tool: str, task_ref: str, fields: dict[str, Any], 
         raise ToolError("invalid_update", str(exc), task_ref=task_ref) from exc
 
     ctx.audit(tool, task_ref, json.dumps(_auditable(fields), sort_keys=True))
-    return {"task_ref": task_ref, "task": _projection(cache.get_task_row(row["id"], ctx.conn))}
+    return {"task_ref": task_ref, "task": _projection_of(row["id"], ctx.conn)}
+
+
+def _projection_of(task_id: str, conn: sqlite3.Connection) -> dict[str, Any]:
+    """The projection of a task this call has just written, so it is there."""
+    row = cache.get_task_row(task_id, conn)
+    assert row is not None
+    return _projection(row)
 
 
 def _auditable(fields: dict[str, Any]) -> dict[str, Any]:

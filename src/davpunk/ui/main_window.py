@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import uuid
+from typing import cast
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtGui import QAction, QKeySequence, QShortcut
@@ -26,7 +27,7 @@ from davpunk.conflict.resolver import ConflictError, Mode, load_conflict, resolv
 from davpunk.core import cache
 from davpunk.core.cache import CacheError, ReadOnlyResourceError, TaskConflictError
 from davpunk.core.locking import is_syncing
-from davpunk.models.task import Status, Task
+from davpunk.models.task import Status, Task, stored
 from davpunk.ui import viewmodel as vm
 from davpunk.ui.dialogs import (
     BulkSubtaskDialog,
@@ -501,7 +502,7 @@ class MainWindow(QMainWindow):
         fields = fields_for(task, tasks)
         if fields is None:
             return
-        cache.update_task_optimistic(task.id, fields, self.conn)
+        cache.update_task_optimistic(stored(task.id), fields, self.conn)
         self.refresh()
 
     # ------------------------------------------------------------------ views
@@ -549,7 +550,7 @@ class MainWindow(QMainWindow):
         selected = self.selected_task()
         if selected is None:
             return
-        parent = cache.get_task(selected.id, self.conn) or selected
+        parent = cache.get_task(stored(selected.id), self.conn) or selected
 
         dialog = BulkSubtaskDialog(parent, self)
         if dialog.exec() != BulkSubtaskDialog.DialogCode.Accepted:
@@ -560,7 +561,7 @@ class MainWindow(QMainWindow):
 
         siblings = [
             task
-            for task in vm.load_tasks(self.conn, calendar_ids=[parent.calendar_id])
+            for task in vm.load_tasks(self.conn, calendar_ids=[stored(parent.calendar_id)])
             if task.parent_uid == parent.uid
         ]
         # The same status proposal a single new subtask gets: on the board,
@@ -637,7 +638,7 @@ class MainWindow(QMainWindow):
         task.calendar_id = editor.calendar_id()
         for field, value in editor.changed_fields().items():
             if field == "categories":
-                task.categories = value
+                task.categories = cast(list[str], value)
             else:
                 setattr(task, field, value)
         task.summary = task.summary or "New task"
@@ -646,7 +647,7 @@ class MainWindow(QMainWindow):
         # an order value is only meaningful inside one sibling group.
         siblings = [
             t
-            for t in vm.load_tasks(self.conn, calendar_ids=[task.calendar_id])
+            for t in vm.load_tasks(self.conn, calendar_ids=[stored(task.calendar_id)])
             if t.parent_uid == task.parent_uid
         ]
         task.davpunk_order = vm.initial_order(siblings)
@@ -663,7 +664,7 @@ class MainWindow(QMainWindow):
             self.resolve_conflict_for(task)
             return
 
-        fresh = cache.get_task(task.id, self.conn) or task
+        fresh = cache.get_task(stored(task.id), self.conn) or task
         tasks = vm.load_tasks(self.conn)
         editor = TaskEditor(fresh, self, calendars=cache.calendar_rows(self.conn), tasks=tasks)
         if editor.exec() != TaskEditor.DialogCode.Accepted:
@@ -690,7 +691,7 @@ class MainWindow(QMainWindow):
         if not fields and target is None:
             return
         if fields and not self._guarded(
-            lambda: cache.update_task_optimistic(fresh.id, fields, self.conn)
+            lambda: cache.update_task_optimistic(stored(fresh.id), fields, self.conn)
         ):
             return  # the move would push an edit the user was just told failed
         if target is not None:
@@ -701,7 +702,7 @@ class MainWindow(QMainWindow):
             # because the move serializes whatever the row holds by then.
             self._guarded(
                 lambda: cache.move_task_local(
-                    fresh.id, target, self.conn, move_subtree=editor.wants_subtree()
+                    stored(fresh.id), target, self.conn, move_subtree=editor.wants_subtree()
                 )
             )
         self.refresh()
@@ -722,7 +723,9 @@ class MainWindow(QMainWindow):
 
     def _set_status_all(self, tasks: list[Task], status: Status | None) -> None:
         for task in tasks:
-            cache.update_task_optimistic(task.id, {"status": status, "kanban_col": None}, self.conn)
+            cache.update_task_optimistic(
+                stored(task.id), {"status": status, "kanban_col": None}, self.conn
+            )
 
     def toggle_complete(self) -> None:
         view = self.current_view()
@@ -733,7 +736,9 @@ class MainWindow(QMainWindow):
             if task is None:
                 return
             new = Status.NEEDS_ACTION if task.status is Status.COMPLETED else Status.COMPLETED
-            self._guarded(lambda: cache.update_task_optimistic(task.id, {"status": new}, self.conn))
+            self._guarded(
+                lambda: cache.update_task_optimistic(stored(task.id), {"status": new}, self.conn)
+            )
         self.refresh()
 
     def delete_task(self) -> None:
@@ -749,7 +754,7 @@ class MainWindow(QMainWindow):
         box.setText(f"Delete {_name_list(tasks)}?")
 
         subtree_box = None
-        if any(cache.children_of(t.id, self.conn) for t in tasks):
+        if any(cache.children_of(stored(t.id), self.conn) for t in tasks):
             box.setInformativeText(
                 "Subtasks are not deleted with their parent by default; they become root tasks."
             )
@@ -772,8 +777,10 @@ class MainWindow(QMainWindow):
         """
         seen: set[str] = set()
         for task in tasks:
-            below = list(reversed(cache.descendants_of(task.id, self.conn))) if subtree else []
-            for task_id in [*below, task.id]:
+            below = (
+                list(reversed(cache.descendants_of(stored(task.id), self.conn))) if subtree else []
+            )
+            for task_id in [*below, stored(task.id)]:
                 if task_id in seen:
                     continue
                 seen.add(task_id)
@@ -815,7 +822,7 @@ class MainWindow(QMainWindow):
             return
 
         selected = self.selected_task()
-        target = cache.get_task(selected.id, self.conn) if selected is not None else None
+        target = cache.get_task(stored(selected.id), self.conn) if selected is not None else None
         plans = vm.plan_paste(cut, target, vm.load_tasks(self.conn))
         if not plans:
             if target is None:
@@ -834,7 +841,7 @@ class MainWindow(QMainWindow):
             dialog = MoveDialog(
                 cache.calendar_rows(self.conn),
                 movers[0].task.calendar_id,
-                any(cache.children_of(plan.task.id, self.conn) for plan in movers),
+                any(cache.children_of(stored(plan.task.id), self.conn) for plan in movers),
                 self,
                 fixed_target=movers[0].calendar_id,
                 heading=(
@@ -880,7 +887,7 @@ class MainWindow(QMainWindow):
             )
             return
 
-        has_children = any(cache.children_of(task.id, self.conn) for task in tasks)
+        has_children = any(cache.children_of(stored(task.id), self.conn) for task in tasks)
         dialog = MoveDialog(
             cache.calendar_rows(self.conn),
             tasks[0].calendar_id,
@@ -915,7 +922,7 @@ class MainWindow(QMainWindow):
         dialog = MoveDialog(
             cache.calendar_rows(self.conn),
             tasks[0].calendar_id,
-            any(cache.children_of(task.id, self.conn) for task in tasks),
+            any(cache.children_of(stored(task.id), self.conn) for task in tasks),
             self,
             fixed_target=target,
             heading=f"Dropping here also moves {_name_list(tasks)} to another list:",
@@ -944,7 +951,7 @@ class MainWindow(QMainWindow):
         """
         chosen = vm.topmost(tasks, vm.load_tasks(self.conn)) if subtree else tasks
         for task in chosen:
-            cache.move_task_local(task.id, target, self.conn, move_subtree=subtree)
+            cache.move_task_local(stored(task.id), target, self.conn, move_subtree=subtree)
 
     def reorder_selected(self, delta: int) -> None:
         task = self.selected_task()
@@ -953,7 +960,7 @@ class MainWindow(QMainWindow):
         siblings = sorted(
             (
                 t
-                for t in vm.load_tasks(self.conn, calendar_ids=[task.calendar_id])
+                for t in vm.load_tasks(self.conn, calendar_ids=[stored(task.calendar_id)])
                 if t.parent_uid == task.parent_uid
             ),
             key=vm.sort_key,

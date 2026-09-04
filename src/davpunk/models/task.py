@@ -147,7 +147,7 @@ class Task(BaseModel):
     @classmethod
     def _priority_zero_is_undefined(cls, value: int | None) -> int | None:
         """PRIORITY 0 means "undefined" in RFC 5545, not "highest"."""
-        if value in (None, 0):
+        if value is None or value == 0:
             return None
         if not 1 <= value <= 9:
             raise ValueError("PRIORITY must be 1-9, or absent")
@@ -212,6 +212,20 @@ class Task(BaseModel):
         if self.priority == 5:
             return "medium"
         return "low"
+
+
+def stored(value: str | None) -> str:
+    """The id of a task that has been through the cache.
+
+    ``Task.id`` and ``Task.calendar_id`` are ``None`` only between building a
+    task and writing it.  Everything the UI, the sync engine and MCP hand
+    around has come back out of the database, so a ``None`` here is a caller
+    that skipped the write — this reports it where it happened rather than
+    letting it travel on as a NULL bind.
+    """
+    if value is None:
+        raise ValueError("task has no id: it was never written to the cache")
+    return value
 
 
 def canonicalize_fields(fields: dict[str, Any]) -> dict[str, Any]:

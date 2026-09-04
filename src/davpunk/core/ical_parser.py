@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 import re
 from datetime import date, datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 from icalendar import Calendar as ICalendar
 from icalendar import Timezone as ITimezone
@@ -88,7 +88,7 @@ def parse_resource(
     except Exception as exc:  # icalendar raises a wide range
         raise ICalParseError(str(exc)) from exc
 
-    todos = [c for c in calendar.walk("VTODO")]
+    todos = [cast(ITodo, c) for c in calendar.walk("VTODO")]
     if not todos:
         raise ICalParseError("resource contains no VTODO")
 
@@ -322,7 +322,7 @@ def serialize_task(task: Task, *, rewrite_alarms: bool = False) -> str:
         return calendar.to_ical(sorted=False).decode("utf-8")
 
     calendar = ICalendar.from_ical(task.raw_ics)
-    todos = [c for c in calendar.walk("VTODO")]
+    todos = [cast(ITodo, c) for c in calendar.walk("VTODO")]
     if len(todos) != 1:
         raise ICalParseError("expected exactly one VTODO in an editable resource")
     todo = todos[0]

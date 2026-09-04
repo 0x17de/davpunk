@@ -35,7 +35,7 @@ from davpunk.core.ical_parser import (
     serialize_task,
 )
 from davpunk.models.remote import Remote
-from davpunk.models.task import ChangeType, ReadOnlyReason, SyncState
+from davpunk.models.task import ChangeType, ReadOnlyReason, SyncState, stored
 
 log = logging.getLogger("davpunk.core.sync_engine")
 
@@ -560,8 +560,9 @@ def _push_create(
 ) -> None:
     task_id = row["task_id"]
     task = cache.get_task(task_id, conn)
+    assert task is not None  # pending_changes is FK-bound to tasks
     ics = serialize_task(task)
-    href = _join(calendar_href, task.href)
+    href = _join(calendar_href, stored(task.href))
 
     try:
         write = client.put_create(href, ics)
@@ -581,7 +582,7 @@ def _resolve_create_collision(
     result: PushResult,
 ) -> None:
     """412 on a create: adopt if it is ours, re-href once if it is not."""
-    href = _join(calendar_href, task.href)
+    href = _join(calendar_href, stored(task.href))
     existing = client.get(href)
 
     try:
@@ -653,7 +654,8 @@ def _push_update(
     task_id = row["task_id"]
     base_etag = row["base_etag"]
     task = cache.get_task(task_id, conn)
-    href = _join(calendar_href, task.href)
+    assert task is not None  # pending_changes is FK-bound to tasks
+    href = _join(calendar_href, stored(task.href))
 
     if base_etag is None:
         # A NULL base_etag means this row should have been a create.  Repair it

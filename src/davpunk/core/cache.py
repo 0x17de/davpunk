@@ -800,7 +800,8 @@ def set_task_identity(
     sequence: int | None = None,
 ) -> None:
     """Post-PUT bookkeeping: Location rewrite, ETag, SEQUENCE bump."""
-    sets, values = [], []
+    sets: list[str] = []
+    values: list[Any] = []
     if href is not None:
         sets.append("href = ?")
         values.append(href)
@@ -1335,7 +1336,7 @@ def audit_mcp(
 
 def _serialize(values: Iterable[Any]) -> tuple[Any, ...]:
     """sqlite3 cannot bind enums, bools or lists; normalise on the way in."""
-    out = []
+    out: list[Any] = []
     for value in values:
         if isinstance(value, bool):
             out.append(int(value))

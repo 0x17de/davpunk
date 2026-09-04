@@ -155,7 +155,7 @@ class RemoteForm(QWidget):
             ("Sync every", self.interval, "sync_interval"),
             ("Colour", self.color, "color"),
         ):
-            if key is None:
+            if label is None or key is None:
                 # Not a field: something the user may need to act on, so it
                 # stays visible rather than hiding behind a hover.  Spanning
                 # both columns keeps it to one line.

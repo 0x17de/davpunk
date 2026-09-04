@@ -32,7 +32,7 @@ from PySide6.QtWidgets import (
 
 from davpunk.config import KanbanColumn
 from davpunk.core import cache
-from davpunk.models.task import Status, Task
+from davpunk.models.task import Status, Task, stored
 from davpunk.ui import ui_state
 from davpunk.ui import viewmodel as vm
 from davpunk.ui.filter_bar import FilterBar
@@ -132,7 +132,7 @@ def task_item(node: vm.TreeNode) -> QTreeWidgetItem:
         label += f"  ({vm.subtree_size(node)})"
     if node.linked_parent_elsewhere:
         label += "  ↗ linked parent elsewhere"
-    if task.is_read_only:
+    if task.read_only_reason is not None:
         label += f"  🔒 {task.read_only_reason.value}"
     if task.sync_state.value == "conflict":
         label += "  ⚠ conflict"
@@ -201,7 +201,7 @@ def _write_orders(orders: dict[str, int], candidates: list[Task], conn) -> None:
     for uid, order in orders.items():
         target = by_uid.get(uid)
         if target is not None:
-            cache.update_task_optimistic(target.id, {"davpunk_order": order}, conn)
+            cache.update_task_optimistic(stored(target.id), {"davpunk_order": order}, conn)
 
 
 def carry_into(
@@ -271,7 +271,7 @@ def apply_sibling_drop(
     Returns ``(tasks touched, whether a gap had to be rebalanced)``.
     """
     carried = carry_into(
-        conn, [t for t in dragged if not t.is_read_only], onto.calendar_id, move_into
+        conn, [t for t in dragged if not t.is_read_only], stored(onto.calendar_id), move_into
     )
     # After the move, or `topmost` reads the calendar a parent has just left
     # and stops recognising its own children.
@@ -295,7 +295,7 @@ def apply_sibling_drop(
             fields["parent_uid"] = plan.parent_uid
             fields["davpunk_order"] = plan.orders[task.uid]
         if fields and moved is not None:
-            cache.update_task_optimistic(moved.id, fields, conn)
+            cache.update_task_optimistic(stored(moved.id), fields, conn)
             if plan is not None:
                 _write_orders(
                     {uid: order for uid, order in plan.orders.items() if uid != task.uid},
@@ -526,14 +526,14 @@ class ListView(QWidget):
         if task is None:
             return
         new = Status.NEEDS_ACTION if task.status is Status.COMPLETED else Status.COMPLETED
-        cache.update_task_optimistic(task.id, {"status": new}, self.conn)
+        cache.update_task_optimistic(stored(task.id), {"status": new}, self.conn)
         self.refresh()
 
     def reorder(self, task: Task, new_index: int) -> str | None:
         """Apply a keyboard reorder, coalescing rapid ones into one toast."""
         siblings = [
             t
-            for t in vm.load_tasks(self.conn, calendar_ids=[task.calendar_id])
+            for t in vm.load_tasks(self.conn, calendar_ids=[stored(task.calendar_id)])
             if t.parent_uid == task.parent_uid
         ]
         result = vm.reorder_siblings(siblings, task.uid, new_index)
@@ -1155,7 +1155,7 @@ class KanbanView(QWidget):
             # A column spans every list, so the card you are nesting under is
             # often in another one.  It is carried across first — asking as it
             # goes — and the nesting is then an ordinary same-list one.
-            movable = carry_into(self.conn, movable, onto.calendar_id, self.move_into)
+            movable = carry_into(self.conn, movable, stored(onto.calendar_id), self.move_into)
             for plan in vm.plan_paste(movable, onto, vm.load_tasks(self.conn)):
                 if plan.needs_move:
                     # The move was declined or refused, and RELATED-TO resolves
@@ -1174,7 +1174,7 @@ class KanbanView(QWidget):
         for task in movable:
             fields = dict(vm.drop_fields(column))
             fields.update(nesting.get(task.uid, {}))
-            cache.update_task_optimistic(task.id, fields, self.conn)
+            cache.update_task_optimistic(stored(task.id), fields, self.conn)
         self.refresh()
 
     def _calendar_names(self) -> dict[str, str]:
@@ -1262,7 +1262,7 @@ class KanbanView(QWidget):
         column = next((c for c in self.columns if c.id == column_id), None)
         if column is None:
             return
-        cache.update_task_optimistic(task.id, vm.drop_fields(column), self.conn)
+        cache.update_task_optimistic(stored(task.id), vm.drop_fields(column), self.conn)
         self.refresh()
 
     def shift_selected(self, delta: int) -> None:

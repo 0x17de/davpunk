@@ -287,12 +287,12 @@ def _keyring_checks(config: DavPunkConfig) -> Iterator[Check]:
     else, and no amount of waiting will produce it.
     """
     wanted = [
-        (f"keyring[{r.id}]", secret_store.for_remote(r.to_model()))
+        (f"keyring[{r.id}]", secret_store.keyring_for_remote(r.to_model()))
         for r in config.remotes
         if r.credential_backend == "keyring"
     ]
     if config.mcp.enabled and config.mcp.resolved_token_backend == "keyring":
-        wanted.append(("keyring[mcp-token]", secret_store.for_mcp_token(config.mcp)))
+        wanted.append(("keyring[mcp-token]", secret_store.keyring_for_mcp_token()))
     if not wanted:
         return
 

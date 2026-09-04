@@ -240,10 +240,19 @@ def keyring_available() -> bool:
 # -------------------------------------------------------------------- factory
 
 
+def keyring_for_remote(remote) -> KeyringStore:
+    """One remote's keyring item, for a caller that has already chosen the backend.
+
+    ``doctor`` needs :meth:`KeyringStore.exists`, which the protocol has no room
+    for — a GnuPG file answers "is it there" from the filesystem instead.
+    """
+    return KeyringStore(CALDAV_PASSWORD, remote.id, _remote_label(remote))
+
+
 def for_remote(remote) -> SecretStore:
     """The store holding one remote's CalDAV password."""
     if getattr(remote, "credential_backend", "gpg") == "keyring":
-        return KeyringStore(CALDAV_PASSWORD, remote.id, _remote_label(remote))
+        return keyring_for_remote(remote)
     return GpgStore(remote.gpg_file or "", remote.gpg_key_id)
 
 
@@ -262,6 +271,11 @@ def for_remote_backend(backend: str, remote_id: str, **details) -> SecretStore:
     )
 
 
+def keyring_for_mcp_token() -> KeyringStore:
+    """The MCP token's keyring item.  See :func:`keyring_for_remote`."""
+    return KeyringStore(MCP_TOKEN, "mcp", "DavPunk — MCP bearer token")
+
+
 def for_mcp_token(mcp) -> SecretStore:
     """The store holding the MCP bearer token.
 
@@ -269,7 +283,7 @@ def for_mcp_token(mcp) -> SecretStore:
     itself, and pretending it is one of these would hide that difference.
     """
     if mcp.resolved_token_backend == "keyring":
-        return KeyringStore(MCP_TOKEN, "mcp", "DavPunk — MCP bearer token")
+        return keyring_for_mcp_token()
     return GpgStore(mcp.token_path(), mcp.token_gpg_key_id)
 
 

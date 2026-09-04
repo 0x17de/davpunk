@@ -100,10 +100,11 @@ def _run_locked(args, _lock_fd) -> int:
         QMessageBox.critical(None, "Task cache recovered", report.summary())
 
     if config_error is not None or not config.remotes:
-        config = _first_run(args, config, config_error)
-        if config is None:
+        chosen = _first_run(args, config, config_error)
+        if chosen is None:
             cache.close_db(conn)
             return 0
+        config = chosen
 
     cache.reconcile_remotes(config.remotes, conn)
 
