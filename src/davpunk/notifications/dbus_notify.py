@@ -61,7 +61,9 @@ def _notify_send(summary: str, body: str, timeout_ms: int) -> bool:
         return False
     try:
         subprocess.run(
-            ["notify-send", "--app-name", APP_NAME, "-t", str(timeout_ms), summary, body],
+            # "--" first: a task title beginning with "-" is a summary, not an
+            # option, and notify-send's getopt would otherwise read it as one.
+            ["notify-send", "--app-name", APP_NAME, "-t", str(timeout_ms), "--", summary, body],
             check=False,
             timeout=10,
         )
