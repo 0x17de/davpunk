@@ -792,4 +792,4 @@ Two deviations from the plan's suggested dependency list, both deliberate:
 
 ## Licence
 
-MIT
+MIT — see [LICENSE](LICENSE).
