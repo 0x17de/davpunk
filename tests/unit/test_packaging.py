@@ -356,9 +356,11 @@ def test_each_module_installs_a_user_service(module):
     assert "systemd.user.services.davpunk-sync" in text
 
 
-def test_the_readme_documents_the_nix_entry_points():
-    readme = (ROOT / "README.md").read_text()
-    assert "nix develop" in readme
-    assert "nixosModules.default" in readme
-    assert "homeModules.default" in readme
-    assert "overlays.default" in readme
+def test_the_nix_entry_points_are_documented():
+    """The flake outputs live in docs/nix.md, which the README links to."""
+    assert "docs/nix.md" in (ROOT / "README.md").read_text()
+    nix_doc = (ROOT / "docs" / "nix.md").read_text()
+    assert "nix develop" in nix_doc
+    assert "nixosModules.default" in nix_doc
+    assert "homeModules.default" in nix_doc
+    assert "overlays.default" in nix_doc
