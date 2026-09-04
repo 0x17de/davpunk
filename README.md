@@ -26,7 +26,7 @@ keyboard-driven workflows.
 [Running it](#run) · [Development](#development) · [Contributing](#contributing)
 
 **Elsewhere:** [Using DavPunk](docs/guide.md) · [Passwords and keys](docs/credentials.md) ·
-[Nix](docs/nix.md) · [MCP](docs/mcp.md) · [Design](HLD.md)
+[Nix](docs/nix.md) · [MCP](docs/mcp.md) · [Design](HLD.md) · [Security](SECURITY.md)
 
 ## What DavPunk is for
 
@@ -258,14 +258,17 @@ nix develop          # Qt, Radicale, gpg and every dependency, already wired up
 pytest               # the whole suite
 pytest -m radicale   # only the tests that spawn a real Radicale
 ruff check src tests
+mypy                 # needs PySide6 present — see below
 nix flake check      # builds both packages and lints
 ```
 
 Or with uv, if you would rather not use Nix:
 
 ```sh
+uv sync --all-extras
 uv run pytest
 uv run ruff check src tests
+uv run mypy
 ```
 
 The Qt tests run offscreen (`QT_QPA_PLATFORM=offscreen`, which the dev shell
@@ -273,8 +276,16 @@ sets for you) and skip themselves when PySide6 cannot initialise, so the rest of
 the suite runs on a machine with no display. Outside the dev shell PySide6 needs
 `libGL` and friends on `LD_LIBRARY_PATH`; inside it, that is handled.
 
+> [!NOTE]
+> Both of those checks go quiet rather than loud when PySide6 is missing — the
+> Qt tests skip, and mypy, finding no stubs, reads every Qt call as `Any` and
+> passes `davpunk.ui` without looking at it. **Run them somewhere Qt actually
+> imports**, or they will agree with you about code neither of them read —
+> `nix develop` is the short way to be sure.
+
 The suite passes on both dependency sets it is expected to meet — Python 3.12
-with `mcp` 2.x under uv, and Python 3.14 with `mcp` 1.x from nixpkgs.
+with `mcp` 2.x under uv, and Python 3.14 with `mcp` 1.x from nixpkgs. Python
+3.11 is the floor `pyproject.toml` declares, and it passes too.
 
 ## Notable implementation choices
 
@@ -301,9 +312,11 @@ will sort out the design side together.
 
 A few practical things:
 
-- `pytest` and `ruff check src tests` are the checks that run.
-  `.pre-commit-config.yaml` wires up ruff, ruff-format and mypy, so you do not
-  have to remember them.
+- `pytest`, `ruff check src tests` and `mypy` are the checks that run.
+  `.pre-commit-config.yaml` wires up all three, so you do not have to remember
+  them; its mypy hook runs from your own environment, which is what keeps it
+  honest about the Qt code. There is no CI yet — please run them before you
+  open a pull request.
 - When behaviour changes, HLD.md changes with it. Say the word if you would
   like a hand with that part.
 - Commit messages say *why*. Length is welcome.
@@ -323,6 +336,11 @@ always something concrete to build against, and the tests answer whether the
 result matches.
 
 Contributions written the same way are just as welcome.
+
+## Security
+
+Found something? [SECURITY.md](SECURITY.md) has where to send it — privately,
+please — along with what DavPunk does and does not treat as a boundary.
 
 ## Licence
 
