@@ -605,6 +605,11 @@ class _DropTree(QTreeWidget):
         self.setDragDropMode(QAbstractItemView.DragDropMode.DragDrop)
         self.setDefaultDropAction(Qt.DropAction.MoveAction)
         self.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
+        # Every row is one line in the same face — the grey context rows are
+        # italic, not larger — so Qt may take the first row's height for all of
+        # them instead of measuring each.  On a list long enough to need the
+        # scrollbar, that is the whole cost of drawing it.
+        self.setUniformRowHeights(True)
 
     def dropEvent(self, event) -> None:
         tasks = dragged_tasks(event.source())
@@ -1288,6 +1293,7 @@ class SearchView(QWidget):
         layout.addWidget(self.query)
 
         self.results = QTreeWidget()
+        self.results.setUniformRowHeights(True)
         self.results.setHeaderLabels(["Task", "Status", "Due", "List"])
         self.results.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
         self.results.itemActivated.connect(self._activated)
