@@ -455,7 +455,7 @@ class MainWindow(QMainWindow):
             sequence = QKeySequence(binding)
             if sequence.toString() in self._menu_sequences:
                 continue
-            QShortcut(sequence, self, activated=handler)
+            QShortcut(sequence, self).activated.connect(handler)
 
     def keyPressEvent(self, event) -> None:
         """Two-keystroke sequences: ``gg`` to the top, ``dd`` to delete."""
@@ -477,7 +477,9 @@ class MainWindow(QMainWindow):
         if action == "delete_task":
             self.delete_task()
         elif action == "top":
-            self.list_view.tree.setCurrentItem(self.list_view.tree.topLevelItem(0))
+            first = self.list_view.tree.topLevelItem(0)
+            if first is not None:  # an empty list has no top to go to
+                self.list_view.tree.setCurrentItem(first)
         elif action == "expand_all":
             self.set_all_folded(True)
         elif action == "collapse_all":

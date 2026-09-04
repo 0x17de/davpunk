@@ -235,6 +235,17 @@ class MergeDialog(QDialog):
 
     # ------------------------------------------------------------- rendering
 
+    def _cell(self, row: int, column: int) -> QTableWidgetItem:
+        """The item at one grid position.
+
+        The table is filled edge to edge when the dialog is built and rows are
+        never inserted afterwards, so a null cell here is a bug in this dialog
+        rather than a state the rendering has to cope with.
+        """
+        item = self.table.item(row, column)
+        assert item is not None, f"merge table cell ({row}, {column}) was never populated"
+        return item
+
     def _sync_row(self, group_name: str, *, refresh_editor: bool = True) -> None:
         group = next(g for g in DIFF_GROUPS if g.name == group_name)
         row = DIFF_GROUPS.index(group)
@@ -243,21 +254,19 @@ class MergeDialog(QDialog):
         interesting = diff.differs or origin is None
 
         marker = f"  ({ORIGIN_LABELS[origin]})" if interesting else ""
-        field_item = self.table.item(row, COLUMN_FIELD)
+        field_item = self._cell(row, COLUMN_FIELD)
         field_item.setText(f"{group.label}{marker}")
         # Colour alone is a weak signal across themes, so the changed rows are
         # bold as well.
         font = field_item.font()
         font.setBold(interesting)
         field_item.setFont(font)
-        self.table.item(row, COLUMN_REMOTE).setText(fields.render(group, diff.values(Side.REMOTE)))
-        self.table.item(row, COLUMN_LOCAL).setText(fields.render(group, diff.values(Side.LOCAL)))
-        self.table.item(row, COLUMN_RESULT).setText(
-            fields.render(group, self.state.values(group_name))
-        )
+        self._cell(row, COLUMN_REMOTE).setText(fields.render(group, diff.values(Side.REMOTE)))
+        self._cell(row, COLUMN_LOCAL).setText(fields.render(group, diff.values(Side.LOCAL)))
+        self._cell(row, COLUMN_RESULT).setText(fields.render(group, self.state.values(group_name)))
 
         for column in (COLUMN_FIELD, COLUMN_REMOTE, COLUMN_RESULT, COLUMN_LOCAL):
-            item = self.table.item(row, column)
+            item = self._cell(row, column)
             item.setBackground(_changed_brush() if interesting else _plain_brush())
             item.setForeground(_text_brush(interesting))
             item.setToolTip(item.text())

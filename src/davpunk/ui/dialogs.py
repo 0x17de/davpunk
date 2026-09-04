@@ -347,8 +347,8 @@ class BulkSubtaskDialog(QDialog):
 
         # Return belongs to the text box here — it is how you get to the next
         # subtask — so the dialog needs its own way to say "done".
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self._accept_if_any)
-        QShortcut(QKeySequence("Ctrl+Enter"), self, activated=self._accept_if_any)
+        for key in ("Ctrl+Return", "Ctrl+Enter"):
+            QShortcut(QKeySequence(key), self).activated.connect(self._accept_if_any)
 
         self.lines.textChanged.connect(self._recount)
         self._recount()

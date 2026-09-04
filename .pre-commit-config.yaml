@@ -5,13 +5,21 @@ repos:
       - id: ruff
         args: [--fix]
       - id: ruff-format
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.18.2
+
+  # mypy runs from *your* environment rather than an isolated one pre-commit
+  # builds for it.  The isolated form needs every typed dependency listed by
+  # hand, and PySide6 is far too large to want there — but leaving it out does
+  # not make the UI check loosely, it makes it not check at all: with no stubs
+  # to find, every Qt call becomes `Any` and the whole `davpunk.ui` package
+  # passes vacuously.  A local hook cannot drift from what `mypy` tells you at
+  # the terminal, which is the property that matters here.
+  #
+  # It therefore needs mypy on PATH: `nix develop`, or `uv sync --all-extras`.
+  - repo: local
     hooks:
       - id: mypy
-        additional_dependencies:
-          - pydantic
-          - pydantic-settings
-          - types-requests
-        args: [--config-file=pyproject.toml]
+        name: mypy
+        entry: mypy
+        language: system
         pass_filenames: false
+        types: [python]

@@ -10,7 +10,7 @@ value that does not parse is refused rather than silently stored.
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 from PySide6.QtWidgets import (
     QComboBox,
@@ -24,6 +24,12 @@ from PySide6.QtWidgets import (
 
 from davpunk.conflict.resolver import FieldGroup, FieldKind
 from davpunk.models.task import Alarm, AlarmRelated, Status, sort_epoch
+
+#: The concrete widget an editor builds.  Each subclass names its own, so
+#: ``self.widget`` is the real type rather than the ``QWidget`` the base
+#: promises — which is what lets a type checker see ``.text()`` on a
+#: ``QLineEdit`` and refuse it on a ``QSpinBox``.
+W = TypeVar("W", bound=QWidget)
 
 #: Shown where a value is absent, so "empty" never reads as "not loaded".
 UNSET = "(unset)"
@@ -136,7 +142,7 @@ def _duration(seconds: int) -> str:
 # -------------------------------------------------------------------- editing
 
 
-class FieldEditor:
+class FieldEditor(Generic[W]):
     """A widget bound to one group, plus the parsing that goes with it.
 
     ``on_change`` fires only for edits the *user* made: programmatic writes go
@@ -154,7 +160,7 @@ class FieldEditor:
 
     # -- subclass surface
 
-    def _build(self) -> QWidget:  # pragma: no cover - abstract
+    def _build(self) -> W:  # pragma: no cover - abstract
         raise NotImplementedError
 
     def values(self) -> dict[str, Any]:  # pragma: no cover - abstract
@@ -177,8 +183,8 @@ class FieldEditor:
             self._muted = False
 
 
-class _TextEditor(FieldEditor):
-    def _build(self) -> QWidget:
+class _TextEditor(FieldEditor[QLineEdit]):
+    def _build(self) -> QLineEdit:
         line = QLineEdit()
         line.textEdited.connect(self._changed)
         return line
@@ -190,8 +196,8 @@ class _TextEditor(FieldEditor):
         self._quiet(lambda: self.widget.setText(str(values.get(self.group.primary) or "")))
 
 
-class _MultilineEditor(FieldEditor):
-    def _build(self) -> QWidget:
+class _MultilineEditor(FieldEditor[QPlainTextEdit]):
+    def _build(self) -> QPlainTextEdit:
         text = QPlainTextEdit()
         text.setTabChangesFocus(True)  # or Tab would type into a checklist
         text.textChanged.connect(self._changed)
@@ -204,7 +210,7 @@ class _MultilineEditor(FieldEditor):
         self._quiet(lambda: self.widget.setPlainText(str(values.get(self.group.primary) or "")))
 
 
-class _StatusEditor(FieldEditor):
+class _StatusEditor(FieldEditor[QComboBox]):
     """STATUS, carrying the kanban-column override that was set beside it.
 
     The combo edits the status; the override is not typeable and has no widget
@@ -214,7 +220,7 @@ class _StatusEditor(FieldEditor):
     somewhere its own status contradicts.
     """
 
-    def _build(self) -> QWidget:
+    def _build(self) -> QComboBox:
         self._kanban_col: str | None = None
         combo = QComboBox()
         combo.addItems(STATUSES)
@@ -234,7 +240,7 @@ class _StatusEditor(FieldEditor):
         self._quiet(lambda: self.widget.setCurrentText(str(status) if status else NO_STATUS))
 
 
-class _SpinEditor(FieldEditor):
+class _SpinEditor(FieldEditor[QSpinBox]):
     """Priority and per-cent, which share a shape: a range plus one "unset"."""
 
     minimum = 0
@@ -242,7 +248,7 @@ class _SpinEditor(FieldEditor):
     unset_at = 0
     unset_text = UNSET
 
-    def _build(self) -> QWidget:
+    def _build(self) -> QSpinBox:
         spin = QSpinBox()
         spin.setRange(self.minimum, self.maximum)
         spin.setSpecialValueText(self.unset_text)
@@ -268,7 +274,7 @@ class _PercentEditor(_SpinEditor):
     minimum, maximum, unset_at, unset_text = -1, 100, -1, UNSET
 
 
-class _DateTimeEditor(FieldEditor):
+class _DateTimeEditor(FieldEditor[QWidget]):
     """The value and its TZID, edited together because they mean nothing apart."""
 
     def _build(self) -> QWidget:
@@ -303,8 +309,8 @@ class _DateTimeEditor(FieldEditor):
         self._quiet(write)
 
 
-class _TagsEditor(FieldEditor):
-    def _build(self) -> QWidget:
+class _TagsEditor(FieldEditor[QLineEdit]):
+    def _build(self) -> QLineEdit:
         line = QLineEdit()
         line.setPlaceholderText("comma, separated")
         line.textEdited.connect(self._changed)
@@ -319,7 +325,7 @@ class _TagsEditor(FieldEditor):
         self._quiet(lambda: self.widget.setText(", ".join(tags)))
 
 
-class _OpaqueEditor(FieldEditor):
+class _OpaqueEditor(FieldEditor[QLabel]):
     """Alarms and RRULE: transferable between the columns, never hand-typed.
 
     DavPunk never authors an RRULE, and an alarm list is not a text field — so
@@ -328,7 +334,7 @@ class _OpaqueEditor(FieldEditor):
 
     editable = False
 
-    def _build(self) -> QWidget:
+    def _build(self) -> QLabel:
         self._values: dict[str, Any] = dict.fromkeys(self.group.fields)
         label = QLabel()
         label.setWordWrap(True)
@@ -342,7 +348,7 @@ class _OpaqueEditor(FieldEditor):
         self.widget.setText(render(self.group, values))
 
 
-_EDITORS: dict[FieldKind, type[FieldEditor]] = {
+_EDITORS: dict[FieldKind, type[FieldEditor[Any]]] = {
     FieldKind.TEXT: _TextEditor,
     FieldKind.MULTILINE: _MultilineEditor,
     FieldKind.STATUS: _StatusEditor,
@@ -354,5 +360,5 @@ _EDITORS: dict[FieldKind, type[FieldEditor]] = {
 }
 
 
-def editor_for(group: FieldGroup, on_change: Callable[[], None] | None = None) -> FieldEditor:
+def editor_for(group: FieldGroup, on_change: Callable[[], None] | None = None) -> FieldEditor[Any]:
     return _EDITORS[group.kind](group, on_change)

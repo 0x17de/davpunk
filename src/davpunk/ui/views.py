@@ -315,12 +315,29 @@ def apply_sibling_drop(
     return touched, rebalanced
 
 
+def _top_level(tree: QTreeWidget) -> list[QTreeWidgetItem]:
+    """The tree's top-level rows.
+
+    ``topLevelItem`` and ``child`` are declared Optional because an
+    out-of-range index returns null; every index here comes from the matching
+    count, so the ``None`` filter only quiets that — it never hides a row.
+    """
+    return [
+        item for i in range(tree.topLevelItemCount()) if (item := tree.topLevelItem(i)) is not None
+    ]
+
+
+def _children(item: QTreeWidgetItem) -> list[QTreeWidgetItem]:
+    """One row's children.  See :func:`_top_level`."""
+    return [child for i in range(item.childCount()) if (child := item.child(i)) is not None]
+
+
 def _walk(tree: QTreeWidget):
-    stack = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+    stack = _top_level(tree)
     while stack:
         item = stack.pop()
         yield item
-        stack.extend(item.child(i) for i in range(item.childCount()))
+        stack.extend(_children(item))
 
 
 def current_row_key(tree: QTreeWidget):
@@ -366,14 +383,14 @@ def apply_folds(tree: QTreeWidget, folds: vm.FoldState) -> None:
 def all_fold_keys(tree: QTreeWidget) -> list:
     """Every foldable row currently in ``tree``, headings included."""
     keys = []
-    stack = [tree.topLevelItem(i) for i in range(tree.topLevelItemCount())]
+    stack = _top_level(tree)
     while stack:
         item = stack.pop()
         if item.childCount():
             key = item.data(0, FOLD_ROLE)
             if key is not None:
                 keys.append(key)
-            stack.extend(item.child(i) for i in range(item.childCount()))
+            stack.extend(_children(item))
     return keys
 
 
@@ -495,10 +512,7 @@ class ListView(QWidget):
         return _acting_tasks(self.tree.selectedItems())
 
     def select_uid(self, uid: str) -> bool:
-        for index in range(self.tree.topLevelItemCount()):
-            if self._select_in(self.tree.topLevelItem(index), uid):
-                return True
-        return False
+        return any(self._select_in(item, uid) for item in _top_level(self.tree))
 
     def _select_in(self, item: QTreeWidgetItem, uid: str) -> bool:
         task = item.data(0, TASK_ROLE)
