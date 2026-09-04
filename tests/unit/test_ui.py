@@ -4485,3 +4485,77 @@ def test_the_poll_never_starts_a_sync(window, monkeypatch):
     )
     for _ in range(3):
         window._tick()
+
+
+# ------------------------------------------------------------------- theme
+
+
+def test_both_themes_define_the_same_roles():
+    """Neither scheme may be missing a role the other sets, or the app comes up
+    with one colour still inherited from whatever the desktop happened to be."""
+    from davpunk.ui import theme
+
+    dark, light = theme._THEMES["dark"], theme._THEMES["light"]
+    assert dark.keys() == light.keys()
+    assert dark != light
+
+
+def test_an_unknown_theme_falls_back_to_dark_rather_than_raising(caplog):
+    """A mistyped colour scheme must not be a config error: config is read once
+    at startup, and a rejected one drops the user into the first-run wizard."""
+    from davpunk.ui import theme
+
+    assert theme.palette_for("solarized") == theme.palette_for("dark")
+    assert "solarized" in caplog.text
+
+
+def test_the_greyed_group_is_set_by_hand_in_both_themes():
+    """A context row is drawn with Disabled/WindowText — it is content, not
+    chrome — so the group cannot be left for Fusion to derive."""
+    from PySide6.QtGui import QPalette
+
+    from davpunk.ui import theme
+
+    for name in ("dark", "light"):
+        palette = theme.palette_for(name)
+        greyed = palette.color(QPalette.ColorGroup.Disabled, QPalette.ColorRole.WindowText)
+        normal = palette.color(QPalette.ColorGroup.Normal, QPalette.ColorRole.WindowText)
+        background = palette.color(QPalette.ColorGroup.Normal, QPalette.ColorRole.Base)
+        assert greyed != normal, f"{name}: a context row is not distinguishable"
+        assert greyed != background, f"{name}: a context row is invisible"
+
+
+def test_fusion_is_a_style_this_build_actually_has(qapp):
+    """It ships inside qtbase rather than as a style plugin, so no packaging
+    input has to carry it — but nothing else in the suite would notice if a
+    stripped Qt turned up and left the app on a style that ignores the
+    palette."""
+    from PySide6.QtWidgets import QStyleFactory
+
+    # Bound first: QStyleFactory.keys() is a static method returning a list of
+    # style names, not a mapping, so reading it inline trips SIM118.
+    styles = QStyleFactory.keys()
+    assert "Fusion" in styles
+
+
+def test_applying_a_theme_asks_for_fusion_and_the_matching_palette():
+    """Asserted against a stand-in rather than the real QApplication: setting a
+    stylesheet makes Qt wrap the style in a QStyleSheetStyle, so the live app
+    can no longer be asked which style it is actually on."""
+    from davpunk.ui import theme
+
+    class _App:
+        def setStyle(self, name):
+            self.style_name = name
+
+        def setPalette(self, palette):
+            self.palette = palette
+
+        def setStyleSheet(self, sheet):
+            self.sheet = sheet
+
+    app = _App()
+    theme.apply(app, "light")
+    assert app.style_name == "Fusion"
+    assert app.palette == theme.palette_for("light")
+    assert app.sheet.strip()

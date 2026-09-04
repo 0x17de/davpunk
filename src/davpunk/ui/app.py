@@ -66,6 +66,8 @@ def _run_locked(args, _lock_fd) -> int:
     from PySide6.QtGui import QIcon
     from PySide6.QtWidgets import QApplication, QMessageBox
 
+    from davpunk.ui import theme
+
     app = QApplication(sys.argv)
     app.setApplicationName("DavPunk")
     app.setOrganizationName("DavPunk")
@@ -86,6 +88,10 @@ def _run_locked(args, _lock_fd) -> int:
 
     config_path = Path(args.config).expanduser() if args.config else paths.config_file()
     config, config_error = _load(config_path)
+
+    # Before anything can be shown.  A config that failed to load still hands
+    # back defaults, so the error dialog about it is themed like the rest.
+    theme.apply(app, config.theme)
 
     conn, report = cache.open_or_recover()
     if report is not None:

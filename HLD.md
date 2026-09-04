@@ -1062,6 +1062,42 @@ and states that changes apply on the next start. It reloads the file after
 writing and refuses to close silently if the result would not parse, because a
 config that fails at the *next* launch has no dialog left to explain itself.
 
+#### Theme
+
+`theme` is `dark` or `light`, applied in `ui/theme.py` at startup, before the
+first dialog can appear — a config that failed to load still yields defaults,
+so even the error box about it is themed.
+
+It is one `QPalette` and no per-widget colours. Every stylesheet string in the
+UI already names a *role* — `palette(mid)` for a hint, `palette(highlight)` for
+an armed drop target, `AlternateBase` for a changed merge row — so defining the
+roles themes the whole application, and a colour is never written twice.
+
+Two roles are set against Qt's intent, both because the UI already reads them
+that way. `Mid` is a legible muted **foreground**, not a border grey; borders
+take `Dark` and `Shadow`. And the `Disabled` group is set explicitly rather
+than left to be derived, because a greyed row is *content* here — the list
+view's context rows and the merge dialog's uninteresting fields are drawn with
+`Disabled`/`WindowText`, and a derived one blends far enough into a dark
+background to be unreadable.
+
+The style is forced to **Fusion**. A native platform style paints from the
+desktop theme and ignores an application palette for most roles, which is why
+`theme` had no visible effect before; Fusion honours it completely and renders
+identically everywhere, which a Wayland-primary app needs anyway — there may be
+no desktop theme installed to inherit from.
+
+An unknown theme name logs a warning and falls back to `dark` rather than
+raising at config load: the config is read once at startup and a rejected one
+sends the user through the first-run wizard, which is far too much consequence
+for a mistyped colour scheme.
+
+A small application stylesheet rides along for density — item padding, header
+sections, tooltips — and to draw the check indicator, whose Fusion outline is
+derived by darkening the *window* colour and so disappears under a dark tree
+background. Drawing it costs Fusion's checkmark, which a stylesheet cannot ask
+it to keep; a filled accent square stands in.
+
 ### 14.5 Keymap
 
 ```
@@ -1534,7 +1570,7 @@ the file without one. The first-run wizard is the sole exception.
 
 ```toml
 [davpunk]
-theme               = "dark"
+theme               = "dark"        # dark | light
 default_view        = "list"        # list | kanban
 show_completed      = false         # startup default; runtime toggle non-persistent
 max_resource_bytes  = 262144        # oversize quarantine threshold

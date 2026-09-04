@@ -177,7 +177,7 @@ To set it up by hand instead, write `~/.config/davpunk/config.toml`:
 
 ```toml
 [davpunk]
-theme          = "dark"
+theme          = "dark"      # dark | light
 default_view   = "kanban"    # kanban | list
 show_completed = false
 
