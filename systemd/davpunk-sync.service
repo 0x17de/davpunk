@@ -1,6 +1,6 @@
 [Unit]
 Description=DavPunk CalDAV sync daemon
-Documentation=https://github.com/mh/DavPunk
+Documentation=https://github.com/0x17de/davpunk
 # Best-effort: the daemon copes with the network coming and going on its own.
 After=network-online.target
 Wants=network-online.target
