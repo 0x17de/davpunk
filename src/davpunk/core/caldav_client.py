@@ -38,6 +38,9 @@ TIMEOUTS = (10, 30)
 #: adopt-probe and for a conflict refetch.
 MULTIGET_BATCH = 50
 
+#: Ceiling on a single XML response body.  See :func:`_parse_xml`.
+MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
 
 def batch_hrefs(hrefs: list[str], size: int = MULTIGET_BATCH) -> list[list[str]]:
     """The multiget batch plan.
@@ -149,7 +152,24 @@ class CalDAVClient:
     # ---------------------------------------------------------------- plumbing
 
     def _url(self, href: str) -> str:
-        return urljoin(self.base_url, href)
+        """Resolve a server-supplied href against the account's base URL.
+
+        Every href reaching this method came out of the server's own XML — a
+        ``<d:href>`` in a PROPFIND or REPORT, or a ``Location`` on a create.
+        ``urljoin`` honours an *absolute* reference, so an href of
+        ``https://elsewhere.example/x`` (or the protocol-relative
+        ``//elsewhere.example/x``) would replace the origin wholesale, and the
+        session's ``HTTPBasicAuth`` would put the account's password on that
+        request.  ``requests`` strips credentials when a *redirect* crosses
+        origins; nothing was checking this path, so it is checked here.
+        """
+        url = urljoin(self.base_url, href)
+        if not same_origin(self.base_url, url):
+            raise CalDAVError(
+                f"refusing to follow {href!r}: it resolves to {url!r}, which is not on "
+                f"the same origin as {self.base_url!r}"
+            )
+        return url
 
     def _request(self, method: str, href: str, **kwargs: Any) -> requests.Response:
         url = self._url(href)
@@ -453,7 +473,81 @@ class CalDAVClient:
 # ------------------------------------------------------------------ XML utils
 
 
+def _default_port(scheme: str) -> int | None:
+    return {"http": 80, "https": 443}.get(scheme.lower())
+
+
+def same_origin(base: str, candidate: str) -> bool:
+    """Do two URLs share a scheme, host and effective port?
+
+    Explicit default ports compare equal to absent ones, so a server that
+    answers ``https://cal.example.com/`` with hrefs under
+    ``https://cal.example.com:443/`` is not treated as an origin change.  No
+    other leniency: an ``http``/``https`` mismatch is a downgrade, and a
+    different host is the case this exists to catch.
+    """
+    a, b = urlparse(base), urlparse(candidate)
+    if a.scheme.lower() != b.scheme.lower():
+        return False
+    if (a.hostname or "").lower() != (b.hostname or "").lower():
+        return False
+    return (a.port or _default_port(a.scheme)) == (b.port or _default_port(b.scheme))
+
+
+def _prolog_has_doctype(payload: bytes) -> bool:
+    """Is there a ``<!DOCTYPE`` in this document's prolog?
+
+    Walks the prolog by hand — the XML declaration, processing instructions and
+    comments that may precede the root element — and stops at the first thing
+    that is none of those.  Scanning only the prolog is what keeps a task whose
+    description merely *mentions* ``<!DOCTYPE`` from being read as one.
+    """
+    i, n = 0, len(payload)
+    if payload.startswith(b"\xef\xbb\xbf"):  # UTF-8 BOM
+        i = 3
+    while i < n:
+        while i < n and payload[i : i + 1].isspace():
+            i += 1
+        if i >= n or payload[i : i + 1] != b"<":
+            return False
+        if payload[i : i + 9].upper() == b"<!DOCTYPE":
+            return True
+        if payload[i : i + 2] == b"<?":  # XML declaration or PI
+            end = payload.find(b"?>", i)
+            if end < 0:
+                return False
+            i = end + 2
+        elif payload[i : i + 4] == b"<!--":
+            end = payload.find(b"-->", i)
+            if end < 0:
+                return False
+            i = end + 3
+        else:
+            return False  # the root element: the prolog is over
+    return False
+
+
 def _parse_xml(payload: bytes) -> ET.Element:
+    """Parse a response body, with two guards in front of the parser.
+
+    ``xml.etree`` does not fetch external entities (CPython has not since
+    3.7.1), so there is no SSRF here — but it *does* expand entities declared
+    in an internal DTD subset, which is the "billion laughs" amplification.
+    Both that and quadratic blowup need a ``<!DOCTYPE`` to declare the entities
+    in, and a CalDAV response has no legitimate use for one, so the whole class
+    goes away by refusing documents that carry a prolog DOCTYPE.
+
+    The size cap is a second, cruder backstop for a body that is merely
+    enormous rather than cleverly nested.  It sits far above any real response
+    — a 50-resource multiget of full ``calendar-data`` runs to a few hundred
+    kilobytes — and only bounds how much a hostile server can make us hold.
+    """
+    if len(payload) > MAX_RESPONSE_BYTES:
+        raise CalDAVError(
+            f"XML response is {len(payload)} bytes, over the {MAX_RESPONSE_BYTES}-byte limit"
+        )
+    if _prolog_has_doctype(payload):
+        raise CalDAVError("refusing an XML response with a DOCTYPE declaration")
     try:
         return ET.fromstring(payload)
     except ET.ParseError as exc:

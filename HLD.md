@@ -172,7 +172,8 @@ def tx(conn):
     try:
         yield conn
     except BaseException:
-        conn.execute("ROLLBACK"); raise
+        conn.execute("ROLLBACK")
+        raise
     else:
         conn.execute("COMMIT")
 ```
@@ -208,7 +209,7 @@ def remote_sync_lock(remote_id):
             raise SyncBusy(remote_id)
         yield
     finally:
-        os.close(fd)      # kernel releases on close AND on process death
+        os.close(fd)  # kernel releases on close AND on process death
 ```
 
 "Is a sync running?" is a **lock probe**, not a database column — a DB flag
@@ -544,6 +545,47 @@ DELETE FROM alarm_fires    WHERE fired_at    < now() - 90d;
 DELETE FROM conflict_queue WHERE resolved = 1 AND detected_at < now() - 90d;
 ```
 
+### 9.5 What a response is trusted with
+
+Everything above is driven by what the server says: which collections exist,
+which hrefs are in them, where a created resource landed. The server is trusted
+with the *content* of your tasks — it stores them — and with nothing else.
+Three checks in `core/caldav_client.py` hold that line, and the tests in
+`tests/unit/test_caldav_client.py` assert each.
+
+**An href may not leave the account's origin.** Every href reaching the client
+came out of the server's own XML — a `<d:href>` in a 207, a `Location` on a
+create — and `urljoin` honours an absolute reference, so `<d:href>` of
+`https://elsewhere.example/x` (or the protocol-relative `//elsewhere.example/x`)
+replaces the origin outright. The session carries `HTTPBasicAuth`, so that
+request would put the account's password on a host the user never named.
+`requests` strips credentials when a *redirect* crosses origins; nothing
+covered this path, so `_url()` compares scheme, host and effective port against
+the configured base URL and raises `CalDAVError` on a mismatch. An explicit
+`:443` against an implicit one is the same origin; `http` against `https` is
+not, because that is a downgrade off TLS.
+
+**A response body may not carry a DOCTYPE.** `xml.etree` does not fetch
+external entities — CPython has not since 3.7.1, so there is no SSRF here — but
+it does expand entities declared in an internal DTD subset, which is the
+"billion laughs" amplification. Both that and quadratic blowup need a
+`<!DOCTYPE` to declare the entities in, and a CalDAV response has no legitimate
+use for one, so the class is closed by refusing the declaration rather than by
+bounding the expansion. Only the prolog is inspected — the XML declaration,
+comments and PIs that may precede the root element — so a task whose
+description merely *mentions* `<!DOCTYPE` is not a false positive.
+
+**A response body has a ceiling.** `MAX_RESPONSE_BYTES` (64 MiB) is a cruder
+backstop for a body that is merely enormous rather than cleverly nested. It
+sits far above any real response — a 50-resource multiget of full
+`calendar-data` runs to a few hundred kilobytes — and only bounds how much a
+hostile server can make the client hold.
+
+What is deliberately *not* defended: a server that returns wrong task data, or
+that hands back an href inside its own origin that the user did not expect.
+The first is indistinguishable from a user editing on their phone, and the
+second is the server's own namespace to arrange.
+
 ---
 
 ## 10. Push semantics
@@ -755,7 +797,7 @@ def due_deadline(task, tz=None) -> datetime | None:
     tz = tz or local_timezone()
     if not task.due_value:
         return None
-    if "T" not in task.due_value:                      # DATE → end of that day
+    if "T" not in task.due_value:  # DATE → end of that day
         d = date.fromisoformat(task.due_value)
         return datetime.combine(d, time.max, tzinfo=tz)
     dt = parse_datetime(task.due_value)
@@ -763,7 +805,7 @@ def due_deadline(task, tz=None) -> datetime | None:
         return dt.replace(tzinfo=timezone.utc)
     if task.due_tzid:
         return dt.replace(tzinfo=ZoneInfo(task.due_tzid))
-    return dt.replace(tzinfo=tz)                       # floating → local
+    return dt.replace(tzinfo=tz)  # floating → local
 ```
 
 A task due `20260731` is overdue after 23:59:59 local on the 31st — not from
@@ -883,11 +925,12 @@ resolution:
 
 ```python
 if status == "COMPLETED":
-    completed = completed or utcnow(); percent_complete = 100
+    completed = completed or utcnow()
+    percent_complete = 100
 elif status in ("NEEDS-ACTION", "IN-PROCESS"):
-    completed = None            # percent_complete: keep the user's value
+    completed = None  # percent_complete: keep the user's value
 elif status == "CANCELLED":
-    completed = None            # percent_complete: PRESERVED
+    completed = None  # percent_complete: PRESERVED
 ```
 
 ---

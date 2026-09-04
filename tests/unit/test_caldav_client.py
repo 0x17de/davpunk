@@ -6,6 +6,7 @@ import pytest
 import responses
 
 from davpunk.core.caldav_client import (
+    MAX_RESPONSE_BYTES,
     MULTIGET_BATCH,
     TIMEOUTS,
     CalDAVClient,
@@ -14,7 +15,9 @@ from davpunk.core.caldav_client import (
     NotFound,
     PreconditionFailed,
     Unauthorized,
+    _parse_xml,
     batch_hrefs,
+    same_origin,
 )
 from davpunk.models.remote import Remote
 
@@ -501,3 +504,94 @@ def test_verify_tls_is_honoured():
 def test_basic_auth_is_configured(client):
     assert client._session.auth.username == "user"
     assert client._session.auth.password == "hunter2"
+
+
+# ------------------------------------------------- hostile-server hardening
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "https://attacker.example/steal",  # absolute, another host
+        "//attacker.example/steal",  # protocol-relative, same trick
+        "http://cal.example.test/dav/x",  # scheme downgrade off TLS
+        "https://cal.example.test.attacker.example/x",  # suffix, not the host
+    ],
+)
+def test_an_href_that_leaves_the_origin_is_refused(client, href):
+    """The password rides on every request; the server does not get to say where.
+
+    ``urljoin`` honours an absolute reference, so without this check a single
+    ``<d:href>`` in a 207 would put the account's HTTP Basic credentials on a
+    request to a host the user never configured.
+    """
+    with pytest.raises(CalDAVError, match="same origin"):
+        client._url(href)
+
+
+@pytest.mark.parametrize(
+    "href",
+    ["item.ics", "/dav/other/item.ics", "https://cal.example.test/dav/item.ics"],
+)
+def test_ordinary_hrefs_still_resolve(client, href):
+    assert client._url(href).startswith("https://cal.example.test/")
+
+
+def test_an_explicit_default_port_is_the_same_origin():
+    """A server may answer with :443 spelled out; that is not an origin change."""
+    assert same_origin("https://cal.example.test/dav/", "https://cal.example.test:443/dav/x")
+    assert not same_origin("https://cal.example.test/dav/", "https://cal.example.test:8443/dav/x")
+
+
+def test_the_host_comparison_ignores_case():
+    assert same_origin("https://Cal.Example.Test/dav/", "https://cal.example.test/dav/x")
+
+
+BILLION_LAUGHS = b"""<?xml version="1.0"?>
+<!DOCTYPE lolz [
+ <!ENTITY lol "lol">
+ <!ENTITY lol1 "&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;&lol;">
+ <!ENTITY lol2 "&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;&lol1;">
+]>
+<d:multistatus xmlns:d="DAV:"><d:response>&lol2;</d:response></d:multistatus>"""
+
+
+def test_an_entity_bomb_is_refused_before_it_expands():
+    with pytest.raises(CalDAVError, match="DOCTYPE"):
+        _parse_xml(BILLION_LAUGHS)
+
+
+def test_a_doctype_after_a_comment_or_pi_is_still_caught():
+    """The prolog may hold an XML declaration, comments and PIs first."""
+    payload = (
+        b'<?xml version="1.0"?><!-- a comment --><?target data?>'
+        b'<!DOCTYPE x [ <!ENTITY e "boom"> ]><x/>'
+    )
+    with pytest.raises(CalDAVError, match="DOCTYPE"):
+        _parse_xml(payload)
+
+
+def test_a_task_that_merely_mentions_a_doctype_still_parses():
+    """Only the prolog is inspected, so escaped body text is not a false positive."""
+    payload = multistatus(
+        "<d:response><d:href>/dav/x.ics</d:href>"
+        "<d:propstat><d:status>HTTP/1.1 200 OK</d:status>"
+        "<d:prop><d:displayname>write &lt;!DOCTYPE html&gt; first</d:displayname>"
+        "</d:prop></d:propstat></d:response>"
+    ).encode()
+    root = _parse_xml(payload)
+    assert root.findtext(".//{DAV:}displayname") == "write <!DOCTYPE html> first"
+
+
+def test_a_utf8_bom_does_not_hide_a_doctype():
+    with pytest.raises(CalDAVError, match="DOCTYPE"):
+        _parse_xml(b"\xef\xbb\xbf" + BILLION_LAUGHS)
+
+
+def test_an_oversized_body_is_refused():
+    with pytest.raises(CalDAVError, match="over the"):
+        _parse_xml(b"<x/>" + b" " * MAX_RESPONSE_BYTES)
+
+
+def test_an_ordinary_response_parses(client):
+    assert _parse_xml(multistatus().encode()).tag == "{DAV:}multistatus"
