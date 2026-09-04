@@ -10,6 +10,44 @@ keyboard-driven workflows.
 
 [HLD.md](HLD.md) is the design authority; the tests assert it.
 
+> [!IMPORTANT]
+> **Back up your task collections first, and try `davpunk sync --dry-run`
+> before the real thing.**
+>
+> DavPunk writes to your real calendars. It has run daily for months without a
+> slip, but this is version 0.1.0 and only Radicale has been tested hard. The
+> [dry run](#trying-a-sync-without-doing-it) shows every request and every
+> cached row a sync would touch, and writes neither.
+
+## What DavPunk is for
+
+CalDAV has no board in it — a `VTODO` has a `STATUS`, a `RELATED-TO` and not
+much else. DavPunk draws a kanban board over task collections it does not own.
+Four ideas follow from that, and they explain most of the design:
+
+- **The storage is the standard; the board is a view.** Your server holds plain
+  VTODO. Columns map onto `STATUS` and live in your config, so a phone that has
+  never heard of DavPunk reads and writes the same tasks.
+- **Interoperability over features.** A resource DavPunk did not change comes
+  back byte-identical. Where the format has no room for something, DavPunk goes
+  without rather than inventing a property only it can read.
+- **Never lose data, never decide for you.** Edited in two places? You get both
+  versions and a choice, not a winner picked by a timestamp.
+- **Offline-first, keyboard-first.** Every edit hits the local cache
+  immediately; the network is never in the interaction path.
+
+It is not Trello, Vikunja or Nextcloud Deck — no swimlanes, assignees,
+attachments or sharing. Those belong to tools that own their storage, and
+DavPunk would rather not own yours.
+
+[Kanban over CalDAV](https://blog.0x17.de/post/davpunk-kanban-over-caldav/) is
+the longer version.
+
+**Next up:** ordering on `X-APPLE-SORT-ORDER` instead of the private
+`X-DAVPUNK-ORDER`, real recurring-task support (`RRULE` is round-tripped today,
+not supported), reminders with the app closed, and testing against servers
+other than Radicale.
+
 ## Requirements
 
 | | |
@@ -789,6 +827,41 @@ Two deviations from the plan's suggested dependency list, both deliberate:
   `pkg-config` for `dbus-1`; `jeepney` is pure Python and speaks the same
   `org.freedesktop.Notifications` interface. There is a `notify-send` fallback
   behind it.
+
+## Contributing
+
+Contributions are very welcome — and so is simply telling me what you would
+like DavPunk to do. Open an issue with a rough idea; that is often the fastest
+route to something good, and I enjoy the conversation.
+
+[HLD.md](HLD.md) is where behaviour is written down. It is long, and nobody
+expects you to have read it — describe what you would like to change and we
+will sort out the design side together.
+
+A few practical things:
+
+- `pytest` and `ruff check src tests` are the checks that run.
+  `.pre-commit-config.yaml` wires up ruff, ruff-format and mypy, so you do not
+  have to remember them.
+- When behaviour changes, HLD.md changes with it. Say the word if you would
+  like a hand with that part.
+- Commit messages say *why*. Length is welcome.
+
+For bugs, `davpunk doctor` output and the name of your server go a long way —
+plus a `--dry-run` report if a sync is involved.
+
+## Code assistants
+
+DavPunk was built with the help of AI code assistants, and it is worth saying
+so plainly.
+
+The workflow was design-first: [HLD.md](HLD.md) describes how DavPunk should
+behave, the code follows it, and the test suite checks that it does. Writing
+the design down first is what made the assistants genuinely useful — there was
+always something concrete to build against, and the tests answer whether the
+result matches.
+
+Contributions written the same way are just as welcome.
 
 ## Licence
 
