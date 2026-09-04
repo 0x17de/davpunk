@@ -114,16 +114,19 @@ class SyncController(QObject):
 
     def __init__(self, db_path, remotes, parent=None) -> None:
         super().__init__(parent)
-        self.thread = QThread()
-        self.thread.setObjectName("davpunk-sync")
+        # ``_thread``, not ``thread``: QObject already has a ``thread()``
+        # method — the thread an object lives in — and an attribute of that
+        # name shadows it on every SyncController instance.
+        self._thread = QThread()
+        self._thread.setObjectName("davpunk-sync")
         self.worker = SyncWorker(db_path, remotes)
-        self.worker.moveToThread(self.thread)
+        self.worker.moveToThread(self._thread)
 
         self.requestSyncAll.connect(self.worker.sync_all)
         self.requestSyncOne.connect(self.worker.sync_one)
         self.requestDryRun.connect(self.worker.dry_run_all)
-        self.thread.finished.connect(self.worker.shutdown)
-        self.thread.start()
+        self._thread.finished.connect(self.worker.shutdown)
+        self._thread.start()
 
     @property
     def progress(self):
@@ -154,6 +157,6 @@ class SyncController(QObject):
     def stop(self) -> None:
         """Cancel, wait briefly, then detach."""
         self.worker.cancel.set()
-        self.thread.quit()
-        if not self.thread.wait(self.SHUTDOWN_WAIT_MS):
+        self._thread.quit()
+        if not self._thread.wait(self.SHUTDOWN_WAIT_MS):
             log.warning("Sync thread did not stop in %d ms; detaching", self.SHUTDOWN_WAIT_MS)
