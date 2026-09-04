@@ -131,7 +131,7 @@ python3Packages.buildPythonApplication {
       for AI agent integration. The UI targets density and keyboard-driven
       workflows.
     '';
-    homepage = "https://github.com/mh/DavPunk";
+    homepage = "https://github.com/0x17de/davpunk";
     license = lib.licenses.mit;
     mainProgram = "davpunk";
     platforms = lib.platforms.linux;

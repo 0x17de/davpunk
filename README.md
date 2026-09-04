@@ -27,8 +27,8 @@ missing two things tells you about both on the first run.
 ### Nix
 
 ```sh
-nix run github:mh/DavPunk          # just run the UI
-nix profile install github:mh/DavPunk
+nix run github:0x17de/davpunk          # just run the UI
+nix profile install github:0x17de/davpunk
 nix develop                        # dev shell: Qt, Radicale and gpg all wired up
 ```
 
@@ -48,7 +48,7 @@ The one input is `nixpkgs`, so a config with its own pin needs a single line:
 
 ```nix
 inputs.davpunk = {
-  url = "github:mh/DavPunk";
+  url = "github:0x17de/davpunk";
   inputs.nixpkgs.follows = "nixpkgs";
 };
 ```
@@ -61,7 +61,7 @@ work, they just build DavPunk against this flake's own locked nixpkgs instead.
 
 ```nix
 {
-  inputs.davpunk.url = "github:mh/DavPunk";
+  inputs.davpunk.url = "github:0x17de/davpunk";
 
   outputs = { nixpkgs, davpunk, ... }: {
     nixosConfigurations.yourhost = nixpkgs.lib.nixosSystem {
