@@ -44,7 +44,11 @@ would land; a header drop is only ever the column move, since there is no card
 under it to nest into.
 
 **n** starts a new task and **Shift+N** a new subtask of the selection; the
-editor's **List** and **Parent** pickers decide where it lands. Right-clicking
+editor's **List** and **Parent** pickers decide where it lands. The List picker
+starts on the list of the selected task. With nothing selected it starts on the
+list your last new task went into. On the board it only uses a list the filter
+is showing, and otherwise falls back to the first one the filter shows, so the
+new card does not disappear as soon as you save it. Right-clicking
 any task offers the same actions. Started from the board, the editor opens on
 the status of the column you were in — right-click a card in "To Do" and the
 new subtask is a "To Do" too, unless you change it before saving.

@@ -28,6 +28,7 @@ from davpunk.core import cache
 from davpunk.core.cache import CacheError, ReadOnlyResourceError, TaskConflictError
 from davpunk.core.locking import is_syncing
 from davpunk.models.task import Status, Task, stored
+from davpunk.ui import ui_state
 from davpunk.ui import viewmodel as vm
 from davpunk.ui.dialogs import (
     BulkSubtaskDialog,
@@ -49,6 +50,9 @@ POLL_MS = 2000
 
 #: config `default_view` -> index in the view switcher and the stack.
 VIEW_INDEX = {"list": 0, "kanban": 1, "search": 2}
+
+#: Where the list the last new task went into is remembered between runs.
+NEW_TASK_STATE_KEY = "new_task"
 
 
 def _name_list(tasks: list[Task], limit: int = 3) -> str:
@@ -624,7 +628,7 @@ class MainWindow(QMainWindow):
         selected = self.selected_task()
         start_in = calendar_id or (selected.calendar_id if selected is not None else None)
         if start_in not in {row["id"] for row in calendars}:
-            start_in = calendars[0]["id"]
+            start_in = self._default_list([row["id"] for row in calendars])
 
         tasks = vm.load_tasks(self.conn)
         task = Task(
@@ -653,8 +657,27 @@ class MainWindow(QMainWindow):
             if t.parent_uid == task.parent_uid
         ]
         task.davpunk_order = vm.initial_order(siblings)
-        self._guarded(lambda: cache.create_task_local(task, self.conn))
+        if self._guarded(lambda: cache.create_task_local(task, self.conn)):
+            ui_state.remember(NEW_TASK_STATE_KEY, {"calendar": task.calendar_id})
         self.refresh()
+
+    def _default_list(self, available: list[str]) -> str:
+        """The list a new task opens in when nothing selected names one.
+
+        On the board, one of the lists the filter is showing: a task created
+        into a list the board hides vanishes the moment the editor closes,
+        which reads as it never having been created.  Among those, the one the
+        last new task went into — whoever works out of "private" and "work" is
+        usually adding to the one they just added to — and failing that, the
+        first of them.  Every other view shows every list, so there the
+        last-used one alone decides.
+        """
+        in_view = available
+        if isinstance(self.current_view(), KanbanView):
+            picked = self.kanban_view.filter.calendar_ids
+            in_view = [cid for cid in available if cid in picked] or available
+        last = ui_state.get(NEW_TASK_STATE_KEY).get("calendar")
+        return last if last in in_view else in_view[0]
 
     def open_selected(self) -> None:
         task = self.selected_task()

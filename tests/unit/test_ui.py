@@ -2058,6 +2058,68 @@ def test_the_chosen_list_is_where_the_task_lands(
     assert row["calendar_id"] == other_calendar_id
 
 
+def _new_task_starts_in(window, monkeypatch) -> str:
+    seen = {}
+    monkeypatch.setattr(
+        TaskEditor,
+        "exec",
+        lambda e: seen.update(start=e.calendar.currentData()) or TaskEditor.DialogCode.Rejected,
+    )
+    window.new_task()
+    return seen["start"]
+
+
+def test_the_list_a_new_task_went_into_is_remembered(
+    window, calendar_id, other_calendar_id, monkeypatch
+):
+    from davpunk.ui import ui_state
+    from davpunk.ui.main_window import NEW_TASK_STATE_KEY
+
+    ui_state.remember(NEW_TASK_STATE_KEY, {"calendar": calendar_id})
+    _accept_editor(
+        monkeypatch,
+        lambda e: e.calendar.setCurrentIndex(e.calendar.findData(other_calendar_id)),
+    )
+    window.new_task()
+
+    assert ui_state.get(NEW_TASK_STATE_KEY) == {"calendar": other_calendar_id}
+    assert _new_task_starts_in(window, monkeypatch) == other_calendar_id
+
+
+def test_a_new_task_on_the_board_starts_in_a_list_the_filter_shows(
+    window, calendar_id, other_calendar_id, monkeypatch
+):
+    """Nothing selected, so the only hint left is which lists are picked — and
+    a task created into a list the board hides would vanish on creation."""
+    window.switch_view(1)
+    kanban = window.kanban_view
+    for only in (calendar_id, other_calendar_id):
+        _tick(kanban.filter_bar.calendars, {only})
+        assert _new_task_starts_in(window, monkeypatch) == only
+
+
+def test_the_last_used_list_wins_only_while_the_board_shows_it(
+    window, calendar_id, other_calendar_id, remote_id, monkeypatch
+):
+    from davpunk.ui import ui_state
+    from davpunk.ui.main_window import NEW_TASK_STATE_KEY
+
+    with cache.tx(window.conn):
+        third = cache.upsert_calendar(
+            remote_id, "/dav/work/third/", window.conn, display_name="Third"
+        )
+    window.switch_view(1)
+    kanban = window.kanban_view
+    kanban.refresh()
+
+    ui_state.remember(NEW_TASK_STATE_KEY, {"calendar": other_calendar_id})
+    _tick(kanban.filter_bar.calendars, {calendar_id, other_calendar_id})
+    assert _new_task_starts_in(window, monkeypatch) == other_calendar_id
+
+    _tick(kanban.filter_bar.calendars, {calendar_id, third})
+    assert _new_task_starts_in(window, monkeypatch) in {calendar_id, third}
+
+
 def test_a_new_subtask_starts_under_the_selection(window, make_task, monkeypatch):
     cache.create_task_local(make_task("p"), window.conn)
     tree = _list(window)
