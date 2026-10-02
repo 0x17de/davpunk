@@ -1450,12 +1450,21 @@ applies before columns are assigned, and each column header shows the count it
 is currently displaying.
 
 **Show completed.** `config.show_completed` is the startup value of one runtime
-toggle held by the window and honoured by *both* board views — **View ▸ Show
-completed** hides COMPLETED and CANCELLED tasks from the list view's buckets
-and from the board's columns alike. It reached the list view alone at first,
-which made the entry look broken on a board configured with a Done column.
-Search is deliberately excluded: a search is an explicit question, and "I know
-I finished it, where is it" is one of the questions it exists to answer.
+setting held by the window and honoured by *both* board views — **View ▸ Show
+completed** decides which COMPLETED and CANCELLED tasks the list view's buckets
+and the board's columns show: none (*Off*), those finished in the last 3 or 7
+days, a typed-in number of days (*Custom…*), or *All*. It reached the list view
+alone at first, which made the entry look broken on a board configured with a
+Done column. Search is deliberately excluded: a search is an explicit question,
+and "I know I finished it, where is it" is one of the questions it exists to
+answer.
+
+A day window counts local calendar days with today as the first, so "the last
+3 days" is today, yesterday and the day before, and a card leaves the Done
+column at midnight rather than mid-afternoon; both views re-check at local
+midnight. A task's finish is its COMPLETED stamp, or LAST-MODIFIED where it has
+none — always so for CANCELLED, whose COMPLETED the invariant clears. A
+finished task with neither is shown only under *All*.
 
 The board's "*N* task(s) have a status no column shows" line counts only tasks
 whose status names no configured column, not everything absent from the screen.
@@ -1615,7 +1624,7 @@ the file without one. The first-run wizard is the sole exception.
 [davpunk]
 theme               = "dark"        # dark | light
 default_view        = "list"        # list | kanban
-show_completed      = false         # startup default; runtime toggle non-persistent
+show_completed      = false         # false | true | N days; startup default, runtime choice non-persistent
 max_resource_bytes  = 262144        # oversize quarantine threshold
 
 [[davpunk.remotes]]

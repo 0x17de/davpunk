@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
 from davpunk import paths
 from davpunk.config import ConfigError, load_config
 from davpunk.core import credentials, secret_store
+from davpunk.ui import viewmodel as vm
 from davpunk.ui.first_run import store_password
 from davpunk.ui.remote_form import RemoteForm
 from davpunk.ui.widgets import apply_help, help_label, hint
@@ -189,8 +190,22 @@ class SettingsDialog(QDialog):
         self.default_view.addItems(["list", "kanban"])
         self.default_view.setCurrentText(self.config.default_view)
 
-        self.show_completed = QCheckBox("Show completed tasks on startup")
-        self.show_completed.setChecked(self.config.show_completed)
+        self.show_completed = QComboBox()
+        for text, value in vm.SHOW_COMPLETED_CHOICES:
+            self.show_completed.addItem(text.replace("&", ""), value)
+        self.completed_days = QSpinBox()
+        self.completed_days.setRange(1, 3650)
+        self.completed_days.setSuffix(" days")
+        shown = self.config.show_completed
+        self.completed_days.setValue(14 if isinstance(shown, bool) else shown)
+        self.show_completed.currentIndexChanged.connect(self._custom_days_enabled)
+        self.show_completed.setCurrentIndex(vm.show_completed_choice(shown))
+        self._custom_days_enabled()
+        completed_row = QWidget()
+        row = QHBoxLayout(completed_row)
+        row.setContentsMargins(0, 0, 0, 0)
+        row.addWidget(self.show_completed, 1)
+        row.addWidget(self.completed_days)
 
         self.max_bytes = QSpinBox()
         self.max_bytes.setRange(4096, 16 * 1024 * 1024)
@@ -206,14 +221,16 @@ class SettingsDialog(QDialog):
             help_label("Default view", "Which view DavPunk opens on."),
             apply_help(self.default_view, "Which view DavPunk opens on."),
         )
-        form.addRow(
-            "",
-            apply_help(
-                self.show_completed,
-                "Only the starting state. The in-app toggle is deliberately not "
-                "remembered — it is a way of looking at the list, not a preference.",
-            ),
+        completed = (
+            "Which completed and cancelled tasks the list and the board start out "
+            "showing: none, those finished in the last few days, or all of them. "
+            "Only the starting state. View → Show completed changes it for the "
+            "session and is deliberately not remembered — it is a way of looking "
+            "at the list, not a preference."
         )
+        apply_help(self.show_completed, completed)
+        apply_help(self.completed_days, completed)
+        form.addRow(help_label("Show completed", completed), completed_row)
         oversize = (
             "A task whose raw iCalendar data is larger than this is shown read-only "
             "rather than rewritten, so DavPunk cannot mangle something it does not "
@@ -500,6 +517,13 @@ class SettingsDialog(QDialog):
         del self.remotes[index]
         self._refresh_remotes()
 
+    def _custom_days_enabled(self) -> None:
+        self.completed_days.setEnabled(self.show_completed.currentData() is None)
+
+    def chosen_show_completed(self) -> vm.ShowCompleted:
+        value = self.show_completed.currentData()
+        return self.completed_days.value() if value is None else value
+
     # ----------------------------------------------------------------- save
 
     def _save(self) -> None:
@@ -509,7 +533,7 @@ class SettingsDialog(QDialog):
                 general={
                     "theme": self.theme.currentText(),
                     "default_view": self.default_view.currentText(),
-                    "show_completed": self.show_completed.isChecked(),
+                    "show_completed": self.chosen_show_completed(),
                     "max_resource_bytes": self.max_bytes.value(),
                 },
                 remotes=self.remotes,

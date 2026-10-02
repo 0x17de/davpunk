@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -68,6 +68,74 @@ def test_grouping_hides_completed_unless_asked():
     tasks = [task("a", due_value="20260731"), task("b", status=Status.COMPLETED)]
     assert vm.Bucket.COMPLETED not in vm.group_tasks(tasks, NOW, BERLIN)
     assert vm.Bucket.COMPLETED in vm.group_tasks(tasks, NOW, BERLIN, show_completed=True)
+
+
+def _finished(uid, days_ago=None, *, hour=12, status=Status.COMPLETED, stamp="completed"):
+    """A task finished at ``hour`` o'clock Berlin time, ``days_ago`` days before NOW."""
+    if days_ago is None:
+        return task(uid, status=status)
+    at = datetime.combine(NOW.date() - timedelta(days=days_ago), time(hour), tzinfo=BERLIN)
+    return task(uid, status=status, **{stamp: int(at.timestamp())})
+
+
+def test_a_day_window_counts_calendar_days_with_today_as_the_first():
+    tasks = [_finished("today", 0), _finished("two", 2, hour=0), _finished("three", 3, hour=23)]
+    shown = vm.hide_finished(tasks, 3, NOW, BERLIN)
+    assert [t.uid for t in shown] == ["today", "two"]
+
+
+def test_one_day_is_today():
+    tasks = [_finished("today", 0, hour=0), _finished("yesterday", 1, hour=23)]
+    assert [t.uid for t in vm.hide_finished(tasks, 1, NOW, BERLIN)] == ["today"]
+
+
+def test_a_day_window_dates_a_cancelled_task_by_its_last_change():
+    tasks = [
+        _finished("recent", 1, status=Status.CANCELLED, stamp="last_modified"),
+        _finished("stale", 9, status=Status.CANCELLED, stamp="last_modified"),
+    ]
+    assert [t.uid for t in vm.hide_finished(tasks, 7, NOW, BERLIN)] == ["recent"]
+
+
+def test_completed_wins_over_last_modified():
+    """Touching an old finished task does not make it recently finished."""
+    old = _finished("old", 20)
+    old.last_modified = int(NOW.timestamp())
+    assert vm.hide_finished([old], 7, NOW, BERLIN) == []
+
+
+def test_a_finished_task_with_no_date_is_left_out_of_a_day_window():
+    undated = _finished("undated")
+    assert vm.hide_finished([undated], 7, NOW, BERLIN) == []
+    assert vm.hide_finished([undated], True, NOW, BERLIN) == [undated]
+
+
+def test_open_tasks_are_never_hidden():
+    open_task = task("open")
+    for show in (False, 3, True):
+        assert vm.hide_finished([open_task], show, NOW, BERLIN) == [open_task]
+
+
+def test_grouping_honours_a_day_window():
+    tasks = [_finished("recent", 1), _finished("old", 10)]
+    grouped = vm.group_tasks(tasks, NOW, BERLIN, show_completed=7)
+    assert [t.uid for t in grouped[vm.Bucket.COMPLETED]] == ["recent"]
+
+
+@pytest.mark.parametrize(
+    ("show", "label"),
+    [
+        (False, "&Off"),
+        (3, "Last &3 days"),
+        (7, "Last &7 days"),
+        (5, "&Custom"),
+        (1, "&Custom"),
+        (True, "&All"),
+    ],
+)
+def test_each_setting_maps_to_one_choice(show, label):
+    """``True == 1``: "all" and "the last day" must not be mistaken for each other."""
+    assert vm.SHOW_COMPLETED_CHOICES[vm.show_completed_choice(show)][0] == label
 
 
 def test_grouping_drops_empty_buckets():

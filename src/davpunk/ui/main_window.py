@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import logging
 import uuid
+from collections.abc import Callable
 from typing import cast
 
 from PySide6.QtCore import Qt, QTimer, Signal
-from PySide6.QtGui import QAction, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QCheckBox,
     QComboBox,
     QDialog,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMenu,
@@ -201,11 +203,23 @@ class MainWindow(QMainWindow):
         self._action(view_menu, "&Kanban", lambda: self.switch_view(1), "view_kanban")
         self._action(view_menu, "&Search", lambda: self.switch_view(2), "view_search")
         view_menu.addSeparator()
-        self.show_completed_action = QAction("Show &completed", self, checkable=True)
-        self.show_completed_action.setChecked(self.list_view.show_completed)
-        self.show_completed_action.triggered.connect(self._toggle_completed)
-        self.menu_handlers["Show completed"] = self._toggle_completed
-        view_menu.addAction(self.show_completed_action)
+        self.show_completed_menu = view_menu.addMenu("Show &completed")
+        # Exclusive by default: one of these is always the one in force.
+        group = QActionGroup(self)
+        self.show_completed_actions: dict[str, QAction] = {}
+        for text, value in vm.SHOW_COMPLETED_CHOICES:
+            if value is None:
+                text, handler = f"{text}…", self.choose_completed_days
+            else:
+                handler = self._show_completed_handler(value)
+            action = QAction(text, self, checkable=True)
+            group.addAction(action)
+            action.triggered.connect(handler)
+            key = f"Show completed: {text.replace('&', '').rstrip('…')}"
+            self.show_completed_actions[key] = action
+            self.menu_handlers[key] = handler
+            self.show_completed_menu.addAction(action)
+        self._check_show_completed()
         # Named after the configured column rather than after "In Progress":
         # the label is the user's to change, and a menu entry pointing at a
         # column name that is not on the board explains nothing.
@@ -338,7 +352,7 @@ class MainWindow(QMainWindow):
             widget.setCurrentItem(item)
         self.context_menu_for(self.selected_task()).exec(widget.viewport().mapToGlobal(point))
 
-    def _toggle_completed(self) -> None:
+    def set_show_completed(self, show: vm.ShowCompleted) -> None:
         """One view state, honoured by every view that hides anything.
 
         It used to reach the list view only, so on the board — where the Done
@@ -347,10 +361,41 @@ class MainWindow(QMainWindow):
         question, and "I know I finished it, where is it" is one of the
         questions it exists to answer.
         """
-        wanted = not self.list_view.show_completed
         for view in (self.list_view, self.kanban_view):
-            view.set_show_completed(wanted)
-        self.show_completed_action.setChecked(wanted)
+            view.set_show_completed(show)
+        self._check_show_completed()
+
+    def _show_completed_handler(self, show: vm.ShowCompleted) -> Callable[[], None]:
+        return lambda: self.set_show_completed(show)
+
+    def choose_completed_days(self) -> None:
+        """Ask for a day count.  Cancelling leaves the setting as it was —
+        and has to tick its entry again, since Qt already ticked "Custom"."""
+        current = self.list_view.show_completed
+        days, ok = QInputDialog.getInt(
+            self,
+            "Show completed",
+            "Show tasks finished in the last … days:",
+            current if not isinstance(current, bool) else 14,
+            1,
+            3650,
+        )
+        if ok:
+            self.set_show_completed(days)
+        else:
+            self._check_show_completed()
+
+    def _check_show_completed(self) -> None:
+        """Tick the entry in force, and put a custom count in its label so the
+        menu says what is actually being shown."""
+        show = self.list_view.show_completed
+        chosen = vm.show_completed_choice(show)
+        entries = zip(vm.SHOW_COMPLETED_CHOICES, self.show_completed_actions.values(), strict=True)
+        for index, ((text, value), action) in enumerate(entries):
+            action.setChecked(index == chosen)
+            if value is None:
+                days = f" ({show} day{'' if show == 1 else 's'})" if index == chosen else ""
+                action.setText(f"{text}{days}…")
 
     def _toggle_context_children(self) -> None:
         """Board-only, unlike "Show completed": the list view is one slice, so

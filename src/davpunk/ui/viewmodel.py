@@ -14,7 +14,7 @@ import re
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, tzinfo
+from datetime import UTC, date, datetime, time, timedelta, tzinfo
 from enum import StrEnum
 
 from davpunk.config import KanbanColumn
@@ -57,12 +57,96 @@ BUCKET_ORDER = (
 
 
 def is_finished(task: Task) -> bool:
-    """What "show completed" hides.
+    """What "show completed" is about.
 
     Cancelled counts: it is finished work too, and a board that hid the one
     while keeping the other would only ever look like a bug.
     """
     return task.status in (Status.COMPLETED, Status.CANCELLED)
+
+
+#: The "show completed" setting: ``False`` hides finished work, ``True`` shows
+#: all of it, a number N shows what was finished in the last N days.
+ShowCompleted = bool | int
+
+
+#: What the menu and the preferences offer, in order, as ``(label, setting)``.
+#: ``None`` is "custom": a day count typed in rather than picked.
+SHOW_COMPLETED_CHOICES: tuple[tuple[str, ShowCompleted | None], ...] = (
+    ("&Off", False),
+    ("Last &3 days", 3),
+    ("Last &7 days", 7),
+    ("&Custom", None),
+    ("&All", True),
+)
+
+
+def show_completed_choice(show: ShowCompleted) -> int:
+    """The index in :data:`SHOW_COMPLETED_CHOICES` of the entry ``show`` is:
+    "custom" for a day count none of the fixed ones names.  Matched by type
+    as well as by value — ``True == 1``, but "all" is not "the last day"."""
+    custom = 0
+    for index, (_label, value) in enumerate(SHOW_COMPLETED_CHOICES):
+        if value is None:
+            custom = index
+        elif type(value) is type(show) and value == show:
+            return index
+    return custom
+
+
+def finished_at(task: Task) -> datetime | None:
+    """When a finished task was finished, as near as the data says.
+
+    COMPLETED where there is one.  A cancelled task never has one — the
+    invariant clears it — and neither does one finished by a client that does
+    not write it, so LAST-MODIFIED stands in: what finished it was very likely
+    the last thing done to it.
+    """
+    stamp = task.completed if task.completed is not None else task.last_modified
+    return None if stamp is None else datetime.fromtimestamp(stamp, UTC)
+
+
+def finished_cutoff(
+    show: ShowCompleted, now: datetime | None = None, tz: tzinfo | None = None
+) -> datetime | None:
+    """The earliest finish a day window still shows, or ``None`` for none.
+
+    Counted in local calendar days with today as the first, not in 24-hour
+    stretches: "the last 3 days" is today, yesterday and the day before, so a
+    card does not vanish from the Done column in the middle of an afternoon.
+    """
+    if isinstance(show, bool):
+        return None
+    tz = tz or local_timezone()
+    now = now or datetime.now(tz)
+    first_day = now.astimezone(tz).date() - timedelta(days=show - 1)
+    return datetime.combine(first_day, time.min, tzinfo=tz)
+
+
+def hide_finished(
+    tasks: list[Task],
+    show: ShowCompleted,
+    now: datetime | None = None,
+    tz: tzinfo | None = None,
+) -> list[Task]:
+    """``tasks`` without the finished ones ``show`` leaves out.
+
+    A finished task with no date at all is left out of a day window: there is
+    nothing to say it is recent, and "all" is one click away.
+    """
+    if show is True:
+        return tasks
+    cutoff = finished_cutoff(show, now, tz)
+
+    def shown(task: Task) -> bool:
+        if not is_finished(task):
+            return True
+        if cutoff is None:
+            return False
+        at = finished_at(task)
+        return at is not None and at >= cutoff
+
+    return [task for task in tasks if shown(task)]
 
 
 def bucket_of(task: Task, now: datetime | None = None, tz: tzinfo | None = None) -> Bucket:
@@ -94,17 +178,14 @@ def group_tasks(
     now: datetime | None = None,
     tz: tzinfo | None = None,
     *,
-    show_completed: bool = False,
+    show_completed: ShowCompleted = False,
 ) -> dict[Bucket, list[Task]]:
     tz = tz or local_timezone()
     now = now or datetime.now(tz)
 
     grouped: dict[Bucket, list[Task]] = {b: [] for b in BUCKET_ORDER}
-    for task in tasks:
-        bucket = bucket_of(task, now, tz)
-        if bucket is Bucket.COMPLETED and not show_completed:
-            continue
-        grouped[bucket].append(task)
+    for task in hide_finished(tasks, show_completed, now, tz):
+        grouped[bucket_of(task, now, tz)].append(task)
 
     for bucket in grouped:
         grouped[bucket].sort(key=sort_key)

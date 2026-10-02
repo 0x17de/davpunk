@@ -406,7 +406,8 @@ class ListView(QWidget):
         super().__init__(parent)
         self.conn = conn
         self.config = config
-        self.show_completed = config.show_completed  # runtime toggle, not persisted
+        #: Runtime view state, seeded from the config and not written back.
+        self.show_completed: vm.ShowCompleted = config.show_completed
         self._last_reorder = 0.0
         self._pending_reorder = 0
         #: What a drop into another list goes through — see :func:`carry_into`.
@@ -528,12 +529,13 @@ class ListView(QWidget):
 
     # --------------------------------------------------------------- actions
 
-    def set_show_completed(self, show: bool) -> None:
+    def set_show_completed(self, show: vm.ShowCompleted) -> None:
         self.show_completed = show
         self.refresh()
 
     def toggle_show_completed(self) -> None:
-        self.set_show_completed(not self.show_completed)
+        """Between none and all: a day window toggles off."""
+        self.set_show_completed(self.show_completed is False)
 
     def toggle_complete(self) -> None:
         task = self.selected_task()
@@ -854,7 +856,7 @@ class KanbanView(QWidget):
         # The same runtime view state the list view has, for the same reason:
         # a board with the Done column configured shows finished work until
         # you say otherwise.
-        self.show_completed = config.show_completed
+        self.show_completed: vm.ShowCompleted = config.show_completed
         #: Context rows for subtasks *below* a card in the In Progress column:
         #: off, because that column is the one you read most often and a parent
         #: picked up there drags its whole scattered family in behind it.
@@ -922,6 +924,21 @@ class KanbanView(QWidget):
 
         self._apply_folds()
         self._paint_headers()
+
+        # A day window of finished work moves at midnight with nothing in the
+        # data changing, so nothing else would tell the board to look again.
+        self._midnight = QTimer(self)
+        self._midnight.setSingleShot(True)
+        self._midnight.timeout.connect(self._on_midnight)
+        self._arm_midnight()
+
+    def _arm_midnight(self) -> None:
+        self._midnight.start(int(vm.seconds_to_midnight() * 1000))
+
+    def _on_midnight(self) -> None:
+        if not isinstance(self.show_completed, bool):
+            self.refresh()
+        self._arm_midnight()
 
     # ---------------------------------------------------------- folded columns
 
@@ -1011,7 +1028,7 @@ class KanbanView(QWidget):
         self.filter_bar.set_calendars(self._calendar_names())
         self.filter_bar.set_tags(vm.available_tags(tasks))
 
-        visible = tasks if self.show_completed else [t for t in tasks if not vm.is_finished(t)]
+        visible = vm.hide_finished(tasks, self.show_completed)
         board = vm.kanban_board(visible, self.columns, self.filter)
         # Every card on the board, so a column can also show the subtasks that
         # went to *other* columns — greyed, but not gone.
@@ -1043,12 +1060,13 @@ class KanbanView(QWidget):
         )
         self._update_counts(board, shown, len(visible), stranded)
 
-    def set_show_completed(self, show: bool) -> None:
+    def set_show_completed(self, show: vm.ShowCompleted) -> None:
         self.show_completed = show
         self.refresh()
 
     def toggle_show_completed(self) -> None:
-        self.set_show_completed(not self.show_completed)
+        """Between none and all: a day window toggles off."""
+        self.set_show_completed(self.show_completed is False)
 
     def inprogress_columns(self) -> list[KanbanColumn]:
         """The configured columns that stand for IN-PROCESS.

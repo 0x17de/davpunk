@@ -370,7 +370,10 @@ class DavPunkConfig(BaseModel):
 
     theme: str = "dark"
     default_view: str = "kanban"
-    show_completed: bool = False  # startup default; runtime toggle is not persisted
+    #: How much finished work the views start out showing: ``false`` none,
+    #: ``true`` all of it, a number N what was finished in the last N days.
+    #: A startup default; the runtime choice is not persisted.
+    show_completed: bool | int = False
     max_resource_bytes: int = 262_144  # oversize quarantine threshold
     unified_view: bool = True
 
@@ -384,6 +387,13 @@ class DavPunkConfig(BaseModel):
     def _known_view(cls, value: str) -> str:
         if value not in ("list", "kanban"):
             raise ValueError("default_view must be 'list' or 'kanban'")
+        return value
+
+    @field_validator("show_completed")
+    @classmethod
+    def _whole_days(cls, value: bool | int) -> bool | int:
+        if not isinstance(value, bool) and value < 1:
+            raise ValueError("show_completed must be true, false, or a number of days (1 or more)")
         return value
 
     @field_validator("max_resource_bytes")

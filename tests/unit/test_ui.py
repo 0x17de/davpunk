@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import os
 from collections import Counter
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
@@ -3819,16 +3820,112 @@ def test_a_chord_is_shown_but_not_bound_as_a_shortcut(window):
     assert window.keymap["delete_task"] in delete.text()
 
 
-def test_show_completed_is_a_checkable_view_entry(window, make_task):
+def _show_completed(window, label):
+    return window.show_completed_actions[f"Show completed: {label}"]
+
+
+def _days_ago(days):
+    return int((datetime.now(UTC) - timedelta(days=days)).timestamp())
+
+
+def test_show_completed_is_a_choice_in_the_view_menu(window, make_task):
     cache.create_task_local(
         make_task("done", summary="Finished", status=Status.COMPLETED), window.conn
     )
     window.refresh()
-    assert not window.show_completed_action.isChecked()
+    labels = [a.text().replace("&", "") for a in window.show_completed_menu.actions()]
+    assert labels == ["Off", "Last 3 days", "Last 7 days", "Custom…", "All"]
+    assert _show_completed(window, "Off").isChecked()
 
-    window.show_completed_action.trigger()
-    assert window.show_completed_action.isChecked()
+    _show_completed(window, "All").trigger()
+    assert _show_completed(window, "All").isChecked()
+    assert not _show_completed(window, "Off").isChecked()
     assert window.list_view.select_uid("done")
+
+
+def test_a_day_window_shows_only_recently_finished_work(window, make_task):
+    cache.create_task_local(
+        make_task("fresh", status=Status.COMPLETED, completed=_days_ago(1)), window.conn
+    )
+    cache.create_task_local(
+        make_task("week", status=Status.COMPLETED, completed=_days_ago(5)), window.conn
+    )
+    cache.create_task_local(
+        make_task("old", status=Status.COMPLETED, completed=_days_ago(30)), window.conn
+    )
+    cache.create_task_local(make_task("open"), window.conn)
+
+    _show_completed(window, "Last 3 days").trigger()
+    _list(window)
+    assert [
+        uid for uid in ("fresh", "week", "old", "open") if window.list_view.select_uid(uid)
+    ] == [
+        "fresh",
+        "open",
+    ]
+    kanban = _kanban(window)
+    assert _find(kanban.lists["done"], "fresh") is not None
+    assert _find(kanban.lists["done"], "week") is None
+
+    _show_completed(window, "Last 7 days").trigger()
+    assert _find(kanban.lists["done"], "week") is not None
+    assert _find(kanban.lists["done"], "old") is None
+
+
+def test_a_cancelled_task_is_dated_by_its_last_change(window, make_task):
+    """CANCELLED clears COMPLETED, so the window has nothing else to go by."""
+    task_id = cache.create_task_local(make_task("gone", status=Status.CANCELLED), window.conn)
+    _show_completed(window, "Last 3 days").trigger()
+    kanban = _kanban(window)
+    assert _find(kanban.lists["cancelled"], "gone") is not None
+
+    with window.conn:
+        window.conn.execute(
+            "UPDATE tasks SET last_modified = ? WHERE id = ?", (_days_ago(10), task_id)
+        )
+    window.refresh()
+    assert _find(kanban.lists["cancelled"], "gone") is None
+
+
+def test_custom_asks_for_a_day_count(window, make_task, monkeypatch):
+    from PySide6.QtWidgets import QInputDialog
+
+    cache.create_task_local(
+        make_task("week", status=Status.COMPLETED, completed=_days_ago(10)), window.conn
+    )
+    monkeypatch.setattr(QInputDialog, "getInt", lambda *args, **kwargs: (12, True))
+    _show_completed(window, "Custom").trigger()
+
+    assert window.list_view.show_completed == 12
+    assert window.kanban_view.show_completed == 12
+    assert _show_completed(window, "Custom").isChecked()
+    assert _show_completed(window, "Custom").text() == "&Custom (12 days)…"
+    assert window.list_view.select_uid("week")
+
+
+def test_cancelling_custom_keeps_the_choice_in_force(window, monkeypatch):
+    """Qt ticks "Custom" on the click, before anyone has typed a number."""
+    from PySide6.QtWidgets import QInputDialog
+
+    _show_completed(window, "Last 7 days").trigger()
+    monkeypatch.setattr(QInputDialog, "getInt", lambda *args, **kwargs: (0, False))
+    _show_completed(window, "Custom").trigger()
+
+    assert window.list_view.show_completed == 7
+    assert _show_completed(window, "Last 7 days").isChecked()
+    assert not _show_completed(window, "Custom").isChecked()
+
+
+def test_a_configured_day_count_starts_ticked(qapp, conn, db_path):
+    from davpunk.ui.main_window import MainWindow
+
+    win = MainWindow(DavPunkConfig(show_completed=7), conn, db_path)
+    try:
+        assert _show_completed(win, "Last 7 days").isChecked()
+        assert win.kanban_view.show_completed == 7
+    finally:
+        win.sync.stop()
+        win._poll.stop()
 
 
 def test_show_completed_reaches_the_board_as_well(window, make_task):
@@ -3843,11 +3940,11 @@ def test_show_completed_reaches_the_board_as_well(window, make_task):
     # hidden on purpose, not stranded.
     assert kanban.filter_bar.summary.text() == ""
 
-    window.show_completed_action.trigger()
+    _show_completed(window, "All").trigger()
     assert _find(kanban.lists["done"], "done") is not None
     assert _find(kanban.lists["cancelled"], "gone") is not None
 
-    window.show_completed_action.trigger()
+    _show_completed(window, "Off").trigger()
     assert _find(kanban.lists["done"], "done") is None
 
 
@@ -3874,9 +3971,9 @@ def test_the_context_entry_is_named_after_the_configured_column(window):
 
 def test_the_two_views_agree_about_show_completed(window):
     """One view state, or switching views would silently flip it back."""
-    window.show_completed_action.trigger()
-    assert window.list_view.show_completed
-    assert window.kanban_view.show_completed
+    _show_completed(window, "Last 3 days").trigger()
+    assert window.list_view.show_completed == 3
+    assert window.kanban_view.show_completed == 3
 
 
 def test_the_toolbar_also_offers_preferences(window):
@@ -3924,6 +4021,48 @@ def test_the_settings_dialog_shows_the_current_general_values(qapp, written_conf
     dialog = SettingsDialog(load_config(written_config), written_config)
     assert dialog.theme.currentText() == "dark"
     assert dialog.default_view.currentText() == "kanban"
+    assert dialog.show_completed.currentText() == "Off"
+    assert not dialog.completed_days.isEnabled()
+
+
+@pytest.mark.parametrize(
+    ("label", "days", "expected"),
+    [
+        ("Off", 9, False),
+        ("Last 3 days", 9, 3),
+        ("Last 7 days", 9, 7),
+        ("Custom", 9, 9),
+        ("All", 9, True),
+    ],
+)
+def test_the_settings_dialog_reads_back_show_completed(qapp, written_config, label, days, expected):
+    from davpunk.config import load_config
+    from davpunk.ui.settings import SettingsDialog
+
+    dialog = SettingsDialog(load_config(written_config), written_config)
+    dialog.show_completed.setCurrentText(label)
+    dialog.completed_days.setValue(days)
+    assert dialog.completed_days.isEnabled() is (label == "Custom")
+    chosen = dialog.chosen_show_completed()
+    assert chosen == expected and type(chosen) is type(expected)
+
+
+def test_a_custom_day_count_survives_the_settings_round_trip(qapp, written_config):
+    from davpunk.config import load_config
+    from davpunk.ui.settings import SettingsDialog, write_settings
+
+    config = load_config(written_config)
+    write_settings(
+        written_config,
+        general={"show_completed": 12},
+        remotes=[r.model_dump() for r in config.remotes],
+        mcp={},
+    )
+    back = load_config(written_config)
+    assert back.show_completed == 12
+    dialog = SettingsDialog(back, written_config)
+    assert dialog.show_completed.currentText() == "Custom"
+    assert dialog.completed_days.value() == 12
 
 
 def test_saving_preserves_comments_and_untouched_sections(qapp, written_config):

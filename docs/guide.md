@@ -194,9 +194,14 @@ still opens them.
 ## Finished work
 
 Completed and cancelled tasks are hidden by default, in the list *and* on the
-board. **View → Show completed** brings them back for as long as you leave it
-ticked; it is not saved, so it starts from `show_completed` in the config every
-time. Search ignores it — finding something you know you finished is one of the
+board. **View → Show completed** brings them back: *Last 3 days* or *Last 7
+days* shows what you finished recently, *Custom…* asks for any number of days,
+*All* shows everything and *Off* hides it again. Days are calendar days with
+today as the first, so "the last 3 days" is today, yesterday and the day before.
+
+The choice is not saved, so it starts from `show_completed` in the config every
+time — `false`, `true`, or a number of days — which **Edit → Preferences** also
+sets. Search ignores it — finding something you know you finished is one of the
 things search is for.
 
 ## Filtering the board
